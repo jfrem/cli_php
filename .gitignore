@@ -1,0 +1,7 @@
+/vendor/  
+.env  
+*.phar  
+/build/  
+/dist/  
+.DS_Store  
+Thumbs.db 
