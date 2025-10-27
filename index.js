@@ -10,7 +10,7 @@ const program = new Command();
 program
     .name("php-init")
     .description("CLI para crear backend PHP MVC con API REST JSON")
-    .version("4.4.0");
+    .version("1.0.0");
 
 // ==============================
 // Utilidades simples
