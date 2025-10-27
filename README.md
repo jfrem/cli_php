@@ -4,7 +4,7 @@
 
 CLI moderno y profesional para crear backends PHP siguiendo el patrón MVC, con soporte para MySQL y SQL Server, autenticación JWT, y generación automática de CRUDs.
 
-[![Version](https://img.shields.io/badge/version-4.4.0-blue.svg)](https://github.com/usuario/php-init)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/usuario/php-init)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![PHP](https://img.shields.io/badge/PHP-8.0%2B-purple.svg)](https://php.net)
 [![Node](https://img.shields.io/badge/Node-16%2B-green.svg)](https://nodejs.org)
