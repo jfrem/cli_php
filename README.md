@@ -100,6 +100,7 @@ npm install
 
 # Instalar globalmente
 npm link
+npm install -g .
 
 # Verificar instalación
 php-init --version
