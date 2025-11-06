@@ -2020,24 +2020,29 @@ async function makeController(name) {
     success(`Creado: app/Controllers/${className}.php`);
 }
 
-async function makeModel(name) {
+async function makeModel(name, tableName) {
     if (!inProject()) error('No estás en un proyecto.');
 
-    const answers = await inquirer.prompt([
-        {
-            type: 'input',
-            name: 'tableName',
-            message: 'Nombre de la tabla en la BD:',
-            default: name.toLowerCase() + 's'
-        }
-    ]);
+    let finalTableName = tableName;
+
+    if (!finalTableName) {
+        const answers = await inquirer.prompt([
+            {
+                type: 'input',
+                name: 'tableNamePrompt',
+                message: 'Nombre de la tabla en la BD:',
+                default: name.toLowerCase() + 's'
+            }
+        ]);
+        finalTableName = answers.tableNamePrompt;
+    }
 
     const className = cap(name) + 'Model';
     const file = path.join(process.cwd(), 'app/Models', `${className}.php`);
 
     if (exists(file)) return warn(`${className}.php ya existe.`);
 
-    write(process.cwd(), `app/Models/${className}.php`, t.crudModel(className, answers.tableName));
+    write(process.cwd(), `app/Models/${className}.php`, t.crudModel(className, finalTableName));
     success(`Creado: app/Models/${className}.php`);
 }
 
@@ -2221,7 +2226,7 @@ program
     .action(makeController);
 
 program
-    .command('make:model <nombre>')
+    .command('make:model <nombre> [tabla]')
     .description('Crea un modelo')
     .action(makeModel);
 
