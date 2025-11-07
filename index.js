@@ -691,65 +691,130 @@ class AuthMiddleware
 }`,
 
     authController: `<?php
-namespace App\\Controllers;
+namespace App\Controllers;
 
-use App\\Models\\UserModel;
-use App\\Models\\JwtDenylistModel;
-use App\\Models\\RefreshTokenModel;
-use Core\\Response;
-use Core\\JWT;
-use Core\\Validator;
-use Core\\Logger;
-use Core\\AuthMiddleware;
+use App\Models\JwtDenylistModel;
+use App\Models\RefreshTokenModel;
+use App\Models\UserModel;
+use Core\AuthMiddleware;
+use Core\Env;
+use Core\JWT;
+use Core\Logger;
+use Core\Response;
+use Core\Validator;
 
 class AuthController extends Controller
 {
-    private $userModel;
+    private UserModel $userModel;
+    private RefreshTokenModel $refreshTokenModel;
 
     public function __construct()
     {
         $this->userModel = new UserModel();
+        $this->refreshTokenModel = new RefreshTokenModel();
+    }
+
+    private function getRefreshCookieName(): string
+    {
+        return Env::get('REFRESH_TOKEN_COOKIE_NAME', 'formvin_refresh_token');
+    }
+
+    private function buildRefreshCookieOptions(bool $expire = false): array
+    {
+        $secureDefault = Env::get('APP_ENV', 'production') !== 'development';
+        $secure = filter_var(
+            Env::get('COOKIE_SECURE', $secureDefault ? 'true' : 'false'),
+            FILTER_VALIDATE_BOOLEAN
+        );
+
+        $options = [
+            'expires' => $expire ? time() - 3600 : 0,
+            'path' => Env::get('COOKIE_PATH', '/'),
+            'secure' => $secure,
+            'httponly' => true,
+            'samesite' => Env::get('COOKIE_SAMESITE', 'Strict'),
+        ];
+
+        $domain = Env::get('COOKIE_DOMAIN', '');
+        if (!empty($domain)) {
+            $options['domain'] = $domain;
+        }
+
+        return $options;
+    }
+
+    private function queueRefreshTokenCookie(?string $token, int $ttl): void
+    {
+        $options = $this->buildRefreshCookieOptions();
+        $options['expires'] = time() + $ttl;
+
+        setcookie($this->getRefreshCookieName(), $token ?? '', $options);
+    }
+
+    private function clearRefreshTokenCookie(): void
+    {
+        $options = $this->buildRefreshCookieOptions(true);
+        setcookie($this->getRefreshCookieName(), '', $options);
+    }
+
+    private function getRefreshTokenFromCookie(): string
+    {
+        return $_COOKIE[$this->getRefreshCookieName()] ?? '';
     }
 
     public function register()
     {
         try {
             $body = $this->getBody();
-            
+
             $errors = Validator::validate($body, [
                 'email' => 'required|email',
                 'password' => 'required|min:6',
-                'name' => 'required|min:2'
+                'name' => 'required|min:2',
             ]);
-            
+
             if (!empty($errors)) {
-                Response::error('Errores de validación', 422, $errors);
+                Response::error('Errores de validacion', 422, $errors);
             }
 
             $existing = $this->userModel->findByEmail($body['email']);
             if ($existing) {
                 Logger::warning('Intento de registro con email duplicado');
-                Response::error('El email ya está registrado', 409);
+                Response::error('El email ya esta registrado', 409);
+            }
+
+            $role = 'user';
+            if (isset($body['role']) && $body['role'] === 'admin') {
+                Logger::warning('Intento de registro con rol admin no permitido');
             }
 
             $body['password'] = password_hash($body['password'], PASSWORD_BCRYPT);
-            
+            $body['role'] = $role;
+
             $user = $this->userModel->create($body);
             unset($user['password']);
 
-            $token = JWT::encode(['user_id' => $user['id'], 'email' => $user['email']]);
+            $token = JWT::encode([
+                'user_id' => $user['id'],
+                'email' => $user['email'],
+                'role' => $user['role'],
+            ]);
 
-            Logger::info('Usuario registrado exitosamente');
+            Logger::info('Usuario registrado exitosamente', ['user_id' => $user['id']]);
 
-            Response::success([
-                'user' => $user,
-                'token' => $token
-            ], 'Usuario registrado correctamente', 201);
-        } catch (\\PDOException $e) {
+            Response::success(
+                [
+                    'user' => $user,
+                    'token' => $token,
+                ],
+                'Usuario registrado correctamente',
+                201
+            );
+        } catch (\PDOException $e) {
             $errorId = uniqid('err_');
             Logger::error("Error de BD en registro [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
-        } catch (\\Exception $e) {
+        } catch (\Exception $e) {
             $errorId = uniqid('err_');
             Logger::error("Error al registrar [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error al registrar usuario. ID: {$errorId}", 500);
@@ -760,35 +825,47 @@ class AuthController extends Controller
     {
         try {
             $body = $this->getBody();
-            $errors = Validator::validate($body, ['email' => 'required|email', 'password' => 'required']);
-            if (!empty($errors)) Response::error('Errores de validación', 422, $errors);
+            $errors = Validator::validate($body, [
+                'email' => 'required|email',
+                'password' => 'required',
+            ]);
+            if (!empty($errors)) {
+                Response::error('Errores de validacion', 422, $errors);
+            }
 
             $user = $this->userModel->findByEmail($body['email']);
             if (!$user || !password_verify($body['password'], $user['password'])) {
-                Logger::warning('Intento de login fallido');
-                Response::error('Credenciales inválidas', 401);
+                Logger::warning('Intento de login fallido', ['email' => $body['email'] ?? null]);
+                Response::error('Credenciales invalidas', 401);
             }
 
             unset($user['password']);
 
-            $accessToken = JWT::encode(['user_id' => $user['id'], 'email' => $user['email']]);
-            
-            $refreshTokenModel = new RefreshTokenModel();
-            $refreshTokenValidity = Env::get('JWT_REFRESH_TOKEN_EXPIRATION', 2592000);
-            $refreshToken = $refreshTokenModel->createForUser($user['id'], $refreshTokenValidity);
+            $accessToken = JWT::encode([
+                'user_id' => $user['id'],
+                'email' => $user['email'],
+                'role' => $user['role'],
+            ]);
 
-            Logger::info('Login exitoso');
+            $refreshTokenTtl = (int)Env::get('JWT_REFRESH_TOKEN_EXPIRATION', 2592000);
+            $this->refreshTokenModel->deleteAllForUser($user['id']);
+            $refreshToken = $this->refreshTokenModel->createForUser($user['id'], $refreshTokenTtl);
+            $this->queueRefreshTokenCookie($refreshToken, $refreshTokenTtl);
 
-            Response::success([
-                'user' => $user,
-                'access_token' => $accessToken,
-                'refresh_token' => $refreshToken
-            ], 'Login exitoso');
-        } catch (\\PDOException $e) {
+            Logger::info('Login exitoso', ['user_id' => $user['id']]);
+
+            Response::success(
+                [
+                    'user' => $user,
+                    'access_token' => $accessToken,
+                ],
+                'Login exitoso'
+            );
+        } catch (\PDOException $e) {
             $errorId = uniqid('err_');
             Logger::error("Error de BD en login [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
-        } catch (\\Exception $e) {
+        } catch (\Exception $e) {
             $errorId = uniqid('err_');
             Logger::error("Error al hacer login [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error al hacer login. ID: {$errorId}", 500);
@@ -798,36 +875,53 @@ class AuthController extends Controller
     public function refresh()
     {
         try {
-            $body = $this->getBody();
-            $refreshToken = $body['refresh_token'] ?? '';
-            if (empty($refreshToken)) Response::error('Refresh token no proporcionado', 400);
-
-            $refreshTokenModel = new RefreshTokenModel();
-            $tokenData = $refreshTokenModel->findByToken($refreshToken);
-
-            if (!$tokenData || strtotime($tokenData['expires_at']) < time()) {
-                Response::error('Refresh token inválido o expirado', 401);
+            $refreshToken = $this->getRefreshTokenFromCookie();
+            if (empty($refreshToken)) {
+                Response::error('Refresh token no disponible', 401);
             }
 
-            $refreshTokenModel->delete($tokenData['id']);
+            $tokenData = $this->refreshTokenModel->findByToken($refreshToken);
+
+            if (!$tokenData) {
+                $this->clearRefreshTokenCookie();
+                Response::error('Refresh token inválido', 401);
+            }
+
+            if (strtotime($tokenData['expires_at']) < time()) {
+                $this->refreshTokenModel->delete($tokenData['id']);
+                $this->clearRefreshTokenCookie();
+                Response::error('Refresh token expirado', 401);
+            }
+
+            $this->refreshTokenModel->delete($tokenData['id']);
 
             $user = $this->userModel->find($tokenData['user_id']);
-            if (!$user) Response::error('Usuario no encontrado', 404);
+            if (!$user) {
+                $this->clearRefreshTokenCookie();
+                Response::error('Usuario no encontrado', 404);
+            }
 
-            $newAccessToken = JWT::encode(['user_id' => $user['id'], 'email' => $user['email']]);
-            $newRefreshTokenValidity = Env::get('JWT_REFRESH_TOKEN_EXPIRATION', 2592000);
-            $newRefreshToken = $refreshTokenModel->createForUser($user['id'], $newRefreshTokenValidity);
+            $newAccessToken = JWT::encode([
+                'user_id' => $user['id'],
+                'email' => $user['email'],
+                'role' => $user['role'],
+            ]);
 
-            Response::success([
-                'access_token' => $newAccessToken,
-                'refresh_token' => $newRefreshToken
-            ], 'Tokens actualizados');
+            $refreshTokenTtl = (int)Env::get('JWT_REFRESH_TOKEN_EXPIRATION', 2592000);
+            $newRefreshToken = $this->refreshTokenModel->createForUser($user['id'], $refreshTokenTtl);
+            $this->queueRefreshTokenCookie($newRefreshToken, $refreshTokenTtl);
 
-        } catch (\\PDOException $e) {
+            Response::success(
+                [
+                    'access_token' => $newAccessToken,
+                ],
+                'Tokens actualizados'
+            );
+        } catch (\PDOException $e) {
             $errorId = uniqid('err_');
             Logger::error("Error de BD al refrescar token [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
-        } catch (\\Exception $e) {
+        } catch (\Exception $e) {
             $errorId = uniqid('err_');
             Logger::error("Error al refrescar token [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error al refrescar token. ID: {$errorId}", 500);
@@ -838,19 +932,30 @@ class AuthController extends Controller
     {
         try {
             $payload = JWT::getPayload();
-            if ($payload && isset($payload->jti) && isset($payload->exp)) {
+            if ($payload && isset($payload->jti, $payload->exp, $payload->user_id)) {
                 (new JwtDenylistModel())->deny($payload->jti, $payload->exp);
-                (new RefreshTokenModel())->deleteAllForUser($payload->user_id);
+                $this->refreshTokenModel->deleteAllForUser($payload->user_id);
             }
-            Response::success(null, 'Sesión cerrada correctamente');
-        } catch (\\PDOException $e) {
+
+            $refreshToken = $this->getRefreshTokenFromCookie();
+            if ($refreshToken) {
+                $tokenData = $this->refreshTokenModel->findByToken($refreshToken);
+                if ($tokenData) {
+                    $this->refreshTokenModel->delete($tokenData['id']);
+                }
+            }
+
+            $this->clearRefreshTokenCookie();
+
+            Response::success(null, 'Sesion cerrada correctamente');
+        } catch (\PDOException $e) {
             $errorId = uniqid('err_');
             Logger::error("Error de BD en logout [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
-        } catch (\\Exception $e) {
+        } catch (\Exception $e) {
             $errorId = uniqid('err_');
-            Logger::error("Error al cerrar sesión [ID: {$errorId}]", ['exception' => $e]);
-            Response::error("Error al cerrar sesión. ID: {$errorId}", 500);
+            Logger::error("Error al cerrar sesion [ID: {$errorId}]", ['exception' => $e]);
+            Response::error("Error al cerrar sesion. ID: {$errorId}", 500);
         }
     }
 
@@ -858,9 +963,11 @@ class AuthController extends Controller
     {
         try {
             $payload = AuthMiddleware::getAuthUser();
-            
+            if (!$payload || !isset($payload->user_id)) {
+                Response::error('Token no valido', 401);
+            }
+
             $user = $this->userModel->find($payload->user_id);
-            
             if (!$user) {
                 Response::error('Usuario no encontrado', 404);
             }
@@ -868,11 +975,11 @@ class AuthController extends Controller
             unset($user['password']);
 
             Response::success($user, 'Usuario autenticado');
-        } catch (\\PDOException $e) {
+        } catch (\PDOException $e) {
             $errorId = uniqid('err_');
             Logger::error("Error de BD en /auth/me [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
-        } catch (\\Exception $e) {
+        } catch (\Exception $e) {
             $errorId = uniqid('err_');
             Logger::error("Error en /auth/me [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error al obtener usuario. ID: {$errorId}", 500);
@@ -1195,6 +1302,13 @@ DB_PASS=`;
 JWT_SECRET=your_secret_key_change_in_production_min_32_chars
 JWT_ACCESS_TOKEN_EXPIRATION=900
 JWT_REFRESH_TOKEN_EXPIRATION=2592000
+
+# Cookie Configuration for Refresh Tokens
+# REFRESH_TOKEN_COOKIE_NAME=formvin_refresh_token
+# COOKIE_SECURE=true
+# COOKIE_PATH=/
+# COOKIE_SAMESITE=Lax # Strict, Lax, None
+# COOKIE_DOMAIN= # .yourdomain.com (leave empty for current domain)
 
 # CORS (en producción, define los orígenes permitidos)
 # ALLOWED_ORIGINS=https://tudominio.com,https://otrodominio.com`;
@@ -1584,6 +1698,13 @@ Ejecuta las migraciones SQL en tu base de datos:
 
 ## Autenticación JWT
 
+Este proyecto implementa un sistema de autenticación JWT robusto con las siguientes características de seguridad:
+- **Tokens de Acceso (Access Tokens):** De corta duración, se envían en el header \`Authorization: Bearer {token}\`.
+- **Tokens de Refresco (Refresh Tokens):** De larga duración, se gestionan de forma segura mediante **cookies HttpOnly y Secure**. Esto previene ataques XSS, ya que el JavaScript del frontend no puede acceder a ellos.
+- **Rotación de Tokens de Refresco:** Cada vez que se usa un refresh token (ya sea al iniciar sesión o al refrescar un access token), el token antiguo se invalida y se emite uno nuevo. Esto minimiza la ventana de oportunidad si un refresh token es comprometido.
+- **Revocación de Tokens:** Los tokens pueden ser invalidados explícitamente (ej. al cerrar sesión).
+- **Roles de Usuario:** El rol del usuario se incluye en el payload del JWT para facilitar el control de acceso basado en roles (RBAC).
+
 ### Registro
 \`\`\`bash
 POST /auth/register
@@ -1593,23 +1714,28 @@ POST /auth/register
   "name": "Usuario"
 }
 \`\`\`
+*Nota: El rol del usuario se asigna automáticamente a 'user' por seguridad. Intentar registrarse con un rol 'admin' será ignorado y logueado.*
 
 ### Login
 \`\`\`bash
 POST /auth/login
 {
   "email": "user@example.com",
-  "password": "password123"
+  "password": "123"
 }
 \`\`\`
+*Respuesta:*
+- El \`access_token\` se devuelve en el cuerpo de la respuesta JSON.
+- El \`refresh_token\` se establece automáticamente como una **cookie HttpOnly** en tu navegador.
 
 ### Refrescar Token
 \`\`\`bash
 POST /auth/refresh
-{
-  "refresh_token": "your_refresh_token_here"
-}
 \`\`\`
+*Este endpoint no requiere un cuerpo de solicitud. El \`refresh_token\` se leerá automáticamente de la cookie HttpOnly.*
+*Respuesta:*
+- Un nuevo \`access_token\` se devuelve en el cuerpo de la respuesta JSON.
+- Un nuevo \`refresh_token\` se establece automáticamente como una **nueva cookie HttpOnly**, invalidando el anterior.
 
 ### Cerrar Sesión
 \`\`\`bash
@@ -1617,12 +1743,23 @@ POST /auth/logout
 Headers:
   Authorization: Bearer {access_token}
 \`\`\`
+*Este endpoint invalida el \`access_token\` actual y el \`refresh_token\` asociado (borrando la cookie HttpOnly y el registro en la base de datos).*
 
 ### Obtener usuario autenticado
 \`\`\`bash
 GET /auth/me
 Headers:
   Authorization: Bearer {access_token}
+\`\`\`
+
+### Configuración de Cookies para Refresh Tokens
+Puedes configurar el comportamiento de las cookies del refresh token en tu archivo \`.env\`:
+\`\`\`dotenv
+REFRESH_TOKEN_COOKIE_NAME=formvin_refresh_token
+COOKIE_SECURE=true
+COOKIE_PATH=/
+COOKIE_SAMESITE=Lax # Opciones: Strict, Lax, None
+COOKIE_DOMAIN= # Ej: .tudominio.com (dejar vacío para el dominio actual)
 \`\`\`
 
 ## Sistema de Middleware
