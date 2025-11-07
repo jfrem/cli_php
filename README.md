@@ -266,6 +266,8 @@ Content-Type: application/json
 
 **Respuesta:**
 
+El `access_token` se devuelve en el cuerpo de la respuesta JSON, mientras que el `refresh_token` se establece como una cookie `HttpOnly` y `Secure`.
+
 ```json
 {
   "success": true,
@@ -276,8 +278,7 @@ Content-Type: application/json
       "email": "usuario@example.com",
       "name": "Usuario Ejemplo"
     },
-    "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-    "refresh_token": "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6..."
+    "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
   }
 }
 ```
@@ -286,10 +287,21 @@ Content-Type: application/json
 
 ```bash
 POST /auth/refresh
-Content-Type: application/json
+```
 
+Este endpoint no requiere un cuerpo de solicitud. El `refresh_token` se lee automáticamente de la cookie `HttpOnly`.
+
+**Respuesta:**
+
+Se devuelve un nuevo `access_token` y se establece una nueva cookie con el nuevo `refresh_token`.
+
+```json
 {
-  "refresh_token": "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6..."
+  "success": true,
+  "message": "Tokens actualizados",
+  "data": {
+    "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  }
 }
 ```
 
@@ -299,6 +311,8 @@ Content-Type: application/json
 POST /auth/logout
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
+
+Invalida el `access_token` actual y elimina el `refresh_token` de la base de datos y la cookie del navegador.
 
 #### 5. Obtener Usuario Autenticado
 
@@ -316,6 +330,13 @@ En tu archivo `.env`:
 JWT_SECRET=tu_secreto_super_seguro_de_minimo_32_caracteres
 JWT_ACCESS_TOKEN_EXPIRATION=900          # 15 minutos
 JWT_REFRESH_TOKEN_EXPIRATION=2592000    # 30 días
+
+# Cookie Configuration for Refresh Tokens
+REFRESH_TOKEN_COOKIE_NAME=formvin_refresh_token
+COOKIE_SECURE=true
+COOKIE_PATH=/
+COOKIE_SAMESITE=Lax # Strict, Lax, None
+COOKIE_DOMAIN= # .yourdomain.com (dejar vacío para el dominio actual)
 ```
 
 **⚠️ IMPORTANTE:** En producción, el `JWT_SECRET` debe ser:
@@ -554,7 +575,7 @@ protected function escapeIdentifier(string $identifier): string
 ### Seguridad JWT
 
 - ✅ Validación estricta de `JWT_SECRET` en producción
-- ✅ Refresh tokens con rotación automática
+- ✅ Refresh tokens con rotación automática y gestionados por cookies `HttpOnly`
 - ✅ Revocación de tokens (denylist) con limpieza automática
 - ✅ JWT ID único (jti) para rastreo individual
 - ✅ Expiración configurable de access y refresh tokens
