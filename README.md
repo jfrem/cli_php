@@ -43,7 +43,7 @@ npm install -g php-init
 
 ```bash
 git clone https://github.com/jfrem/cli_php.git
-cd php-init
+cd cli_php
 npm install
 npm link
 ```
@@ -75,14 +75,7 @@ composer install
 Si elegiste autenticación JWT, ejecuta las migraciones en orden:
 
 ```bash
-# 1. Crear tabla de usuarios
-# Ejecuta: database/migrations/users.sql
-
-# 2. Crear tabla de denylist para JWT
-# Ejecuta: database/migrations/jwt_denylist.sql
-
-# 3. Crear tabla de refresh tokens
-# Ejecuta: database/migrations/refresh_tokens.sql
+php-init db:migrate
 ```
 
 ### 4. Iniciar el servidor
@@ -104,6 +97,22 @@ php-init new <nombre>
 ```
 
 Crea un nuevo proyecto PHP MVC con toda la estructura necesaria.
+
+#### Opciones no interactivas
+
+También puedes crear un proyecto de forma no interactiva usando las siguientes opciones:
+
+```bash
+php-init new <nombre> --database <type> --jwt --db-host <host> --db-port <port> --db-name <name> --db-user <user> --db-pass <pass>
+```
+
+-   `--database <type>`: Tipo de base de datos (mysql o sqlsrv)
+-   `--jwt`: Incluir autenticación JWT
+-   `--db-host <host>`: Host de la base de datos
+-   `--db-port <port>`: Puerto de la base de datos
+-   `--db-name <name>`: Nombre de la base de datos
+-   `--db-user <user>`: Usuario de la base de datos
+-   `--db-pass <pass>`: Contraseña de la base de datos
 
 ### Generar Código
 
@@ -161,6 +170,12 @@ Muestra todas las rutas registradas en tu aplicación con formato tabular.
 
 ```bash
 php-init server
+```
+
+#### Ejecutar Migraciones
+
+```bash
+php-init db:migrate
 ```
 
 Inicia el servidor de desarrollo de PHP con configuración interactiva de host y puerto.
@@ -266,8 +281,6 @@ Content-Type: application/json
 
 **Respuesta:**
 
-El `access_token` se devuelve en el cuerpo de la respuesta JSON, mientras que el `refresh_token` se establece como una cookie `HttpOnly` y `Secure`.
-
 ```json
 {
   "success": true,
@@ -283,27 +296,15 @@ El `access_token` se devuelve en el cuerpo de la respuesta JSON, mientras que el
 }
 ```
 
+**Nota:** El `refresh_token` se envía de forma segura como una cookie `HttpOnly`, por lo que no es visible en la respuesta JSON.
+
 #### 3. Refrescar Token
 
 ```bash
 POST /auth/refresh
 ```
 
-Este endpoint no requiere un cuerpo de solicitud. El `refresh_token` se lee automáticamente de la cookie `HttpOnly`.
-
-**Respuesta:**
-
-Se devuelve un nuevo `access_token` y se establece una nueva cookie con el nuevo `refresh_token`.
-
-```json
-{
-  "success": true,
-  "message": "Tokens actualizados",
-  "data": {
-    "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-  }
-}
-```
+**Nota:** Este endpoint no requiere un cuerpo de solicitud. El `refresh_token` se lee automáticamente de la cookie `HttpOnly`.
 
 #### 4. Cerrar Sesión
 
@@ -311,8 +312,6 @@ Se devuelve un nuevo `access_token` y se establece una nueva cookie con el nuevo
 POST /auth/logout
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
-
-Invalida el `access_token` actual y elimina el `refresh_token` de la base de datos y la cookie del navegador.
 
 #### 5. Obtener Usuario Autenticado
 
@@ -330,13 +329,6 @@ En tu archivo `.env`:
 JWT_SECRET=tu_secreto_super_seguro_de_minimo_32_caracteres
 JWT_ACCESS_TOKEN_EXPIRATION=900          # 15 minutos
 JWT_REFRESH_TOKEN_EXPIRATION=2592000    # 30 días
-
-# Cookie Configuration for Refresh Tokens
-REFRESH_TOKEN_COOKIE_NAME=formvin_refresh_token
-COOKIE_SECURE=true
-COOKIE_PATH=/
-COOKIE_SAMESITE=Lax # Strict, Lax, None
-COOKIE_DOMAIN= # .yourdomain.com (dejar vacío para el dominio actual)
 ```
 
 **⚠️ IMPORTANTE:** En producción, el `JWT_SECRET` debe ser:
@@ -575,7 +567,7 @@ protected function escapeIdentifier(string $identifier): string
 ### Seguridad JWT
 
 - ✅ Validación estricta de `JWT_SECRET` en producción
-- ✅ Refresh tokens con rotación automática y gestionados por cookies `HttpOnly`
+- ✅ Refresh tokens con rotación automática
 - ✅ Revocación de tokens (denylist) con limpieza automática
 - ✅ JWT ID único (jti) para rastreo individual
 - ✅ Expiración configurable de access y refresh tokens
