@@ -5,6 +5,10 @@ import fs from "fs-extra";
 import path from "path";
 import crypto from "crypto";
 import { spawn } from "child_process";
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const program = new Command();
 
@@ -20,9 +24,18 @@ program
 const cap = (str) => str.charAt(0).toUpperCase() + str.slice(1);
 
 const write = (base, file, content) => {
-    const full = path.join(base, file);
+    const baseResolved = path.resolve(base);
+    const full = path.resolve(baseResolved, file);
+
+    if (!full.startsWith(baseResolved + path.sep)) {
+        error('Ruta de salida inválida (posible path traversal)');
+    }
+
     fs.ensureDirSync(path.dirname(full));
-    fs.writeFileSync(full, content.trim() + '\n', "utf8");
+    const tmp = full + '.tmp-' + crypto.randomBytes(6).toString('hex');
+    const normalized = String(content).replace(/\r?\n/g, '\n').trim() + '\n';
+    fs.writeFileSync(tmp, normalized, { encoding: 'utf8', mode: 0o644, flag: 'w' });
+    fs.renameSync(tmp, full);
 };
 
 const exists = (file) => fs.existsSync(file);
@@ -40,7 +53,51 @@ const success = (msg) => console.log(`✅ ${msg}`);
 const warn = (msg) => console.log(`⚠️  ${msg}`);
 
 // ==============================
-// Templates simplificados
+// Validación de seguridad para nombres
+// ==============================
+
+const sanitizeClassName = (input, entityType = 'class') => {
+    if (typeof input !== 'string') {
+        throw new Error(`Nombre de ${entityType} debe ser texto`);
+    }
+
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(input)) {
+        throw new Error(`Nombre inválido para ${entityType}: "${input}". Solo A-Z, a-z, 0-9, _, empezando con letra.`);
+    }
+
+    if (input.length > 50) {
+        throw new Error(`Nombre demasiado largo: "${input}"`);
+    }
+
+    return input;
+};
+
+const sanitizeTableName = (input) => {
+    if (typeof input !== 'string') {
+        throw new Error('Nombre de tabla debe ser texto');
+    }
+
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(input)) {
+        throw new Error(`Nombre de tabla inválido: "${input}". Solo a-z, A-Z, 0-9, _, empezando con letra o _.`);
+    }
+
+    return input;
+};
+
+// Validación adicional contra nombres peligrosos de objetos
+const ensureSafeName = (input, entityType = 'nombre') => {
+    if (typeof input !== 'string') {
+        throw new Error(`Nombre de ${entityType} debe ser texto`);
+    }
+    const banned = ['__proto__', 'prototype', 'constructor'];
+    if (banned.includes(input.toLowerCase())) {
+        throw new Error(`Nombre reservado no permitido: "${input}"`);
+    }
+    return input;
+};
+
+// ==============================
+// Templates completos y corregidos
 // ==============================
 
 const t = {
@@ -65,6 +122,7 @@ use Core\\Env;
 use Core\\Router;
 use Core\\RateLimit;
 use Core\\Middleware;
+use Core\\Logger;
 
 header('Content-Type: application/json; charset=utf-8');
 
@@ -87,23 +145,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit();
 }
 
-// Simular PUT/DELETE desde POST
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['_method'])) {
-    $_SERVER['REQUEST_METHOD'] = strtoupper($_POST['_method']);
-}
+// Manejo global de excepciones
+set_exception_handler(function ($e) {
+    Logger::error('Unhandled exception: ' . $e->getMessage(), ['exception' => $e]);
+    
+    if (getenv('APP_ENV') === 'production') {
+        \\Core\\Response::error('Internal server error', 500);
+    } else {
+        \\Core\\Response::error($e->getMessage(), 500);
+    }
+});
 
-Env::load();
+try {
+    Env::load();
 
-// Rate limiting
-$clientIp = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
-RateLimit::check($clientIp);
+    // Rate limiting
+    $clientIp = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    try {
+        RateLimit::check($clientIp);
+    } catch (\\Exception $e) {
+        // En producción, fallar silenciosamente es mejor que exponer errores
+        if (getenv('APP_ENV') === 'development') {
+            throw $e;
+        }
+        // En producción, permitir la solicitud si el rate limiting falla
+        Logger::error('Rate limiting failed: ' . $e->getMessage());
+    }
 
-// Registrar middlewares
-Middleware::register('auth', 'Core\\AuthMiddleware::handle');
+    // Registrar middlewares
+    Middleware::register('auth', 'Core\\AuthMiddleware::handle');
 
-$router = new Router();
-require __DIR__ . '/../app/Routes/web.php';
-$router->dispatch();`,
+    $router = new Router();
+    require __DIR__ . '/../app/Routes/web.php';
+    
+    $router->dispatch();
+} catch (\\Exception $e) {
+    Logger::error('Application bootstrap failed: ' . $e->getMessage());
+    \\Core\\Response::error('Application error', 500);
+}`,
 
     htaccess: `RewriteEngine On
 RewriteCond %{REQUEST_FILENAME} !-f
@@ -114,6 +193,7 @@ RewriteRule ^(.*)$ index.php [QSA,L]`,
 namespace App\\Controllers;
 
 use Core\\Response;
+use Core\\Validator;
 
 class Controller
 {
@@ -124,9 +204,57 @@ class Controller
         Response::success([], 'Controlador base funcionando');
     }
 
+    /**
+     * Obtiene el cuerpo de la petición como JSON
+     * Solo acepta application/json para APIs REST
+     */
     protected function getBody(): array
     {
-        return json_decode(file_get_contents('php://input'), true) ?? [];
+        $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
+        
+        // Solo aceptar JSON para APIs REST
+        if (strpos($contentType, 'application/json') === false) {
+            Response::error('Content-Type must be application/json', 415);
+        }
+        
+        // Límite de tamaño de JSON (por defecto 1MB, configurable vía MAX_JSON_SIZE)
+        $maxSize = (int)(getenv('MAX_JSON_SIZE') ?: 1048576);
+        $contentLength = isset($_SERVER['CONTENT_LENGTH']) ? (int)$_SERVER['CONTENT_LENGTH'] : 0;
+        if ($contentLength > 0 && $maxSize > 0 && $contentLength > $maxSize) {
+            Response::error('Payload Too Large', 413);
+        }
+        
+        $input = file_get_contents('php://input');
+        if ($maxSize > 0 && strlen($input) > $maxSize) {
+            Response::error('Payload Too Large', 413);
+        }
+        
+        if (empty($input)) {
+            return [];
+        }
+        
+        $data = json_decode($input, true);
+        
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            Response::error('Invalid JSON payload: ' . json_last_error_msg(), 400);
+        }
+        
+        return is_array($data) ? $data : [];
+    }
+
+    /**
+     * Validación conveniente para datos de entrada
+     */
+    protected function validate(array $rules): array
+    {
+        $data = $this->getBody();
+        $errors = Validator::validate($data, $rules);
+        
+        if (!empty($errors)) {
+            Response::error('Errores de validación', 422, $errors);
+        }
+        
+        return $data;
     }
 }`,
 
@@ -140,15 +268,52 @@ class Model
 {
     protected $db;
     protected $table = '';
+    
+    /**
+     * Lista blanca de columnas que pueden ser asignadas masivamente
+     * DEBE ser definida en cada modelo hijo para seguridad
+     */
+    protected $fillable = [];
 
     public function __construct()
     {
         $this->db = Database::getConnection();
     }
 
+    /**
+     * Valida que el modelo tenga definida la propiedad $fillable
+     * @throws \\RuntimeException
+     */
+    protected function validateFillable(): void
+    {
+        if (empty($this->fillable)) {
+            throw new \\RuntimeException(
+                'Security: $fillable must be defined in ' . static::class
+            );
+        }
+    }
+
+    /**
+     * Filtra los datos usando la lista blanca $fillable
+     */
+    protected function filterFillable(array $data): array
+    {
+        $this->validateFillable();
+        return array_intersect_key($data, array_flip($this->fillable));
+    }
+
     protected function escapeIdentifier(string $identifier): string
     {
-        return '\`' . str_replace('\`', '\`\`', $identifier) . '\`';
+        $dbType = $_ENV['DB_TYPE'] ?? 'mysql';
+        
+        switch ($dbType) {
+            case 'sqlsrv':
+                return '[' . str_replace(']', ']]', $identifier) . ']';
+            case 'mysql':
+            default:
+                $backtick = chr(96);
+                return $backtick . str_replace($backtick, $backtick . $backtick, $identifier) . $backtick;
+        }
     }
 
     protected function getQuotedTable(): string
@@ -156,6 +321,12 @@ class Model
         if (empty($this->table)) {
             throw new \\Exception('La propiedad $table no puede estar vacía en el modelo.');
         }
+
+        // Validate table name to prevent SQL injection
+        if (!preg_match('/^[a-zA-Z0-9_]+$/', $this->table)) {
+            throw new \\RuntimeException('Nombre de tabla inválido: ' . $this->table);
+        }
+
         return $this->escapeIdentifier($this->table);
     }
 
@@ -177,6 +348,13 @@ class Model
 
     public function create(array $data)
     {
+        // Filtrar datos por la lista blanca $fillable
+        $data = $this->filterFillable($data);
+        
+        if (empty($data)) {
+            throw new \\InvalidArgumentException('No valid data provided for mass assignment');
+        }
+
         $table = $this->getQuotedTable();
         
         $escapedCols = array_map(
@@ -195,6 +373,13 @@ class Model
 
     public function update($id, array $data)
     {
+        // Filtrar datos por la lista blanca $fillable
+        $data = $this->filterFillable($data);
+        
+        if (empty($data)) {
+            throw new \\InvalidArgumentException('No valid data provided for mass assignment');
+        }
+
         $table = $this->getQuotedTable();
         
         $sets = implode(', ', array_map(
@@ -486,6 +671,7 @@ class Env
 namespace Core;
 
 use PDO;
+use PDOException;
 
 class Database
 {
@@ -510,8 +696,7 @@ class Database
             return self::$conn;
         } catch (\\PDOException $e) {
             Logger::error('Error de conexión a la base de datos: ' . $e->getMessage());
-            Response::error('Error de conexión a la base de datos', 500);
-            exit;
+            throw new \\RuntimeException('Error de conexión a la base de datos', 500, $e);
         }
     }
 }`;
@@ -521,6 +706,7 @@ class Database
 namespace Core;
 
 use PDO;
+use PDOException;
 
 class Database
 {
@@ -545,8 +731,7 @@ class Database
             return self::$conn;
         } catch (\\PDOException $e) {
             Logger::error('Error de conexión a la base de datos: ' . $e->getMessage());
-            Response::error('Error de conexión a la base de datos', 500);
-            exit;
+            throw new \\RuntimeException('Error de conexión a la base de datos', 500, $e);
         }
     }
 }`;
@@ -567,19 +752,13 @@ class JWT
         // En producción, el secret DEBE ser robusto.
         if (Env::get('APP_ENV') === 'production') {
             if (empty($secret)) {
-                http_response_code(500);
-                header('Content-Type: application/json');
-                die(json_encode(['success' => false, 'message' => 'Error Crítico: JWT_SECRET no está definido en producción.']));
+                throw new \\RuntimeException('Error Crítico: JWT_SECRET no está definido en producción.');
             }
             if (strlen($secret) < 32) {
-                http_response_code(500);
-                header('Content-Type: application/json');
-                die(json_encode(['success' => false, 'message' => 'Error Crítico: JWT_SECRET debe tener al menos 32 caracteres en producción.']));
+                throw new \\RuntimeException('Error Crítico: JWT_SECRET debe tener al menos 32 caracteres en producción.');
             }
             if ($secret === 'your_secret_key_change_in_production_min_32_chars') {
-                http_response_code(500);
-                header('Content-Type: application/json');
-                die(json_encode(['success' => false, 'message' => 'Error Crítico: El JWT_SECRET por defecto está siendo usado en producción.']));
+                throw new \\RuntimeException('Error Crítico: El JWT_SECRET por defecto está siendo usado en producción.');
             }
         }
 
@@ -691,17 +870,17 @@ class AuthMiddleware
 }`,
 
     authController: `<?php
-namespace App\Controllers;
+namespace App\\Controllers;
 
-use App\Models\JwtDenylistModel;
-use App\Models\RefreshTokenModel;
-use App\Models\UserModel;
-use Core\AuthMiddleware;
-use Core\Env;
-use Core\JWT;
-use Core\Logger;
-use Core\Response;
-use Core\Validator;
+use App\\Models\\JwtDenylistModel;
+use App\\Models\\RefreshTokenModel;
+use App\\Models\\UserModel;
+use Core\\AuthMiddleware;
+use Core\\Env;
+use Core\\JWT;
+use Core\\Logger;
+use Core\\Response;
+use Core\\Validator;
 
 class AuthController extends Controller
 {
@@ -810,11 +989,11 @@ class AuthController extends Controller
                 'Usuario registrado correctamente',
                 201
             );
-        } catch (\PDOException $e) {
+        } catch (\\PDOException $e) {
             $errorId = uniqid('err_');
             Logger::error("Error de BD en registro [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
-        } catch (\Exception $e) {
+        } catch (\\Exception $e) {
             $errorId = uniqid('err_');
             Logger::error("Error al registrar [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error al registrar usuario. ID: {$errorId}", 500);
@@ -861,11 +1040,11 @@ class AuthController extends Controller
                 ],
                 'Login exitoso'
             );
-        } catch (\PDOException $e) {
+        } catch (\\PDOException $e) {
             $errorId = uniqid('err_');
             Logger::error("Error de BD en login [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
-        } catch (\Exception $e) {
+        } catch (\\Exception $e) {
             $errorId = uniqid('err_');
             Logger::error("Error al hacer login [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error al hacer login. ID: {$errorId}", 500);
@@ -917,11 +1096,11 @@ class AuthController extends Controller
                 ],
                 'Tokens actualizados'
             );
-        } catch (\PDOException $e) {
+        } catch (\\PDOException $e) {
             $errorId = uniqid('err_');
             Logger::error("Error de BD al refrescar token [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
-        } catch (\Exception $e) {
+        } catch (\\Exception $e) {
             $errorId = uniqid('err_');
             Logger::error("Error al refrescar token [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error al refrescar token. ID: {$errorId}", 500);
@@ -948,11 +1127,11 @@ class AuthController extends Controller
             $this->clearRefreshTokenCookie();
 
             Response::success(null, 'Sesion cerrada correctamente');
-        } catch (\PDOException $e) {
+        } catch (\\PDOException $e) {
             $errorId = uniqid('err_');
             Logger::error("Error de BD en logout [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
-        } catch (\Exception $e) {
+        } catch (\\Exception $e) {
             $errorId = uniqid('err_');
             Logger::error("Error al cerrar sesion [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error al cerrar sesion. ID: {$errorId}", 500);
@@ -975,11 +1154,11 @@ class AuthController extends Controller
             unset($user['password']);
 
             Response::success($user, 'Usuario autenticado');
-        } catch (\PDOException $e) {
+        } catch (\\PDOException $e) {
             $errorId = uniqid('err_');
             Logger::error("Error de BD en /auth/me [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
-        } catch (\Exception $e) {
+        } catch (\\Exception $e) {
             $errorId = uniqid('err_');
             Logger::error("Error en /auth/me [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error al obtener usuario. ID: {$errorId}", 500);
@@ -993,6 +1172,7 @@ namespace App\\Models;
 class UserModel extends Model
 {
     protected $table = 'users';
+    protected $fillable = ['email', 'password', 'name', 'role'];
 
     public function findByEmail(string $email)
     {
@@ -1082,10 +1262,20 @@ class Logger
     private static function write(string $level, string $message, array $context = []): void
     {
         if (!is_dir(self::$logDir)) {
-            mkdir(self::$logDir, 0755, true);
+            @mkdir(self::$logDir, 0750, true);
         }
 
         $logFile = self::$logDir . '/app-' . date('Y-m-d') . '.log';
+
+        // Sanitize log file path to prevent directory traversal
+        $realLogDir = realpath(self::$logDir);
+        $realLogFile = realpath(dirname($logFile));
+
+        if (!$realLogDir || !$realLogFile || strpos($realLogFile, $realLogDir) !== 0) {
+            // Log to a safe fallback or throw an exception
+            error_log("Security: Invalid log file path detected: {$logFile}");
+            return;
+        }
 
         if (!file_exists($logFile)) {
             self::cleanupOldLogs();
@@ -1113,7 +1303,7 @@ class Logger
         }
 
         $jsonEntry = json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-        file_put_contents($logFile, $jsonEntry . "\\n", FILE_APPEND);
+        file_put_contents($logFile, $jsonEntry . "\\n", FILE_APPEND | LOCK_EX);
     }
 
     private static function cleanupOldLogs(): void
@@ -1157,20 +1347,47 @@ class RateLimit
     private static function withLock(callable $callback)
     {
         $logDir = dirname(self::$lockFile);
-        if (!is_dir($logDir)) {
-            mkdir($logDir, 0755, true);
-        }
-        
-        $lock = fopen(self::$lockFile, 'c');
-        if (!flock($lock, LOCK_EX)) {
-            throw new \\Exception('No se pudo obtener el lock');
-        }
         
         try {
-            return $callback();
-        } finally {
-            flock($lock, LOCK_UN);
-            fclose($lock);
+            if (!is_dir($logDir)) {
+                if (!mkdir($logDir, 0755, true) && !is_dir($logDir)) {
+                    throw new \\RuntimeException('No se pudo crear directorio de logs');
+                }
+            }
+            
+            $lock = fopen(self::$lockFile, 'c');
+            if (!$lock) {
+                throw new \\RuntimeException('No se pudo crear archivo de lock');
+            }
+            
+            // Timeout más estricto para evitar bloqueos prolongados
+            $startTime = microtime(true);
+            $timeout = 2;
+            
+            while (!flock($lock, LOCK_EX | LOCK_NB)) {
+                if (microtime(true) - $startTime > $timeout) {
+                    fclose($lock);
+                    throw new \\RuntimeException('Timeout al obtener lock para rate limiting');
+                }
+                usleep(100000); // 100ms
+            }
+            
+            try {
+                return $callback();
+            } finally {
+                flock($lock, LOCK_UN);
+                fclose($lock);
+            }
+        } catch (\\Exception $e) {
+            Logger::error('Error en rate limiting: ' . $e->getMessage());
+            
+            // En producción, fallar silenciosamente es más seguro
+            if (Env::get('APP_ENV') === 'production') {
+                // Permitir la solicitud si el rate limiting falla
+                return true;
+            }
+            
+            throw $e; // En desarrollo, mostrar el error
         }
     }
     
@@ -1181,7 +1398,8 @@ class RateLimit
         }
         
         $content = file_get_contents(self::$storageFile);
-        return json_decode($content, true) ?? [];
+        $data = json_decode($content, true);
+        return is_array($data) ? $data : [];
     }
     
     private static function saveStorage(array $data): void
@@ -1190,65 +1408,117 @@ class RateLimit
         if (!is_dir($logDir)) {
             mkdir($logDir, 0755, true);
         }
-        file_put_contents(self::$storageFile, json_encode($data));
+        $tmp = self::$storageFile . '.tmp.' . uniqid();
+        file_put_contents($tmp, json_encode($data, JSON_PRETTY_PRINT), LOCK_EX);
+        rename($tmp, self::$storageFile);
     }
     
     private static function cleanupOldEntries(int $window): void
     {
         $storage = self::getStorage();
         $now = time();
+        $changed = false;
         
         foreach ($storage as $key => $data) {
-            $allExpired = empty(array_filter(
+            if (!isset($data['requests']) || !is_array($data['requests'])) {
+                unset($storage[$key]);
+                $changed = true;
+                continue;
+            }
+            
+            // Filtrar requests antiguos
+            $originalCount = count($data['requests']);
+            $data['requests'] = array_filter(
                 $data['requests'],
                 fn($time) => $now - $time < $window
-            ));
+            );
             
-            if ($allExpired && $data['blocked_until'] < $now) {
+            // Eliminar entrada si no hay requests recientes y no está bloqueada
+            $allExpired = empty($data['requests']);
+            $blockExpired = ($data['blocked_until'] ?? 0) < $now;
+            
+            if ($allExpired && $blockExpired) {
                 unset($storage[$key]);
+                $changed = true;
+            } elseif (count($data['requests']) !== $originalCount) {
+                $storage[$key] = $data;
+                $changed = true;
             }
         }
         
-        self::saveStorage($storage);
+        if ($changed) {
+            self::saveStorage($storage);
+        }
     }
     
     public static function check(string $ip, int $limit = 100, int $window = 60): bool
     {
-        return self::withLock(function() use ($ip, $limit, $window) {
-            $storage = self::getStorage();
-            $now = time();
-            $key = "ip_{$ip}";
-            
-            if (!isset($storage[$key])) {
-                $storage[$key] = ['requests' => [], 'blocked_until' => 0];
-            }
-            
-            if ($storage[$key]['blocked_until'] > $now) {
-                Logger::warning("IP bloqueada por rate limit: {$ip}");
-                Response::error('Demasiadas peticiones. Intenta de nuevo más tarde.', 429);
-            }
-            
-            $storage[$key]['requests'] = array_filter(
-                $storage[$key]['requests'],
-                fn($time) => $now - $time < $window
-            );
-            
-            if (count($storage[$key]['requests']) >= $limit) {
-                $storage[$key]['blocked_until'] = $now + $window;
+        try {
+            return self::withLock(function() use ($ip, $limit, $window) {
+                $storage = self::getStorage();
+                $now = time();
+                $key = "ip_{$ip}";
+                
+                if (!isset($storage[$key])) {
+                    $storage[$key] = ['requests' => [], 'blocked_until' => 0];
+                }
+                
+                $entry = &$storage[$key];
+                
+                // Inicializar arrays si no existen
+                if (!isset($entry['requests']) || !is_array($entry['requests'])) {
+                    $entry['requests'] = [];
+                }
+                if (!isset($entry['blocked_until'])) {
+                    $entry['blocked_until'] = 0;
+                }
+                
+                if ($entry['blocked_until'] > $now) {
+                    Logger::warning("IP bloqueada por rate limit: {$ip}");
+                    Response::error('Demasiadas peticiones. Intenta de nuevo más tarde.', 429);
+                }
+                
+                // Filtrar requests antiguos
+                $entry['requests'] = array_filter(
+                    $entry['requests'],
+                    fn($time) => $now - $time < $window
+                );
+                
+                if (count($entry['requests']) >= $limit) {
+                    $entry['blocked_until'] = $now + $window;
+                    self::saveStorage($storage);
+                    Logger::warning("Rate limit excedido para IP: {$ip}");
+                    Response::error('Demasiadas peticiones. Intenta de nuevo más tarde.', 429);
+                }
+                
+                $entry['requests'][] = $now;
                 self::saveStorage($storage);
-                Logger::warning("Rate limit excedido para IP: {$ip}");
-                Response::error('Demasiadas peticiones. Intenta de nuevo más tarde.', 429);
+                
+                // Limpieza probabilística (1% de chance)
+                if (rand(1, 100) === 1) {
+                    self::cleanupOldEntries($window);
+                }
+                
+                return true;
+            });
+        } catch (\\Exception $e) {
+            // En producción, fallar silenciosamente es mejor que exponer errores
+            if (Env::get('APP_ENV') === 'development') {
+                throw $e;
             }
             
-            $storage[$key]['requests'][] = $now;
-            self::saveStorage($storage);
-            
-            if (rand(1, 100) === 1) {
-                self::cleanupOldEntries($window);
-            }
-            
+            // En producción, permitir la solicitud si el rate limiting falla
+            Logger::error('Rate limiting failed: ' . $e->getMessage());
             return true;
-        });
+        }
+    }
+    
+    /**
+     * Interfaz para futuras implementaciones con Redis/Memcached
+     */
+    public static function setStorageAdapter($adapter): void
+    {
+        // Para futura implementación con almacenamiento en memoria
     }
 }`,
 
@@ -1354,6 +1624,7 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(255) UNIQUE NOT NULL,
     password VARCHAR(255) NOT NULL,
     name VARCHAR(255),
+    role VARCHAR(50) DEFAULT 'user',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -1369,6 +1640,7 @@ CREATE TABLE users (
     email VARCHAR(255) UNIQUE NOT NULL,
     password VARCHAR(255) NOT NULL,
     name VARCHAR(255),
+    role VARCHAR(50) DEFAULT 'user',
     created_at DATETIME DEFAULT GETDATE(),
     updated_at DATETIME DEFAULT GETDATE()
 );
@@ -1446,6 +1718,7 @@ namespace App\\Models;
 class RefreshTokenModel extends Model
 {
     protected $table = 'refresh_tokens';
+    protected $fillable = ['user_id', 'token_hash', 'expires_at'];
 
     public function createForUser(int $userId, int $validity): string
     {
@@ -1482,6 +1755,7 @@ namespace App\\Models;
 class JwtDenylistModel extends Model
 {
     protected $table = 'jwt_denylist';
+    protected $fillable = ['jti', 'expires_at'];
 
     public function deny(string $jti, int $expires_at): bool
     {
@@ -1647,6 +1921,7 @@ namespace App\\Models;
 class ${name} extends Model
 {
     protected $table = '${table}';
+    protected $fillable = []; // ¡DEFINIR columnas permitidas para asignación masiva!
 }`,
 
     testTemplate: (name) => `<?php
@@ -1674,6 +1949,25 @@ Thumbs.db`,
     readme: (withJWT) => `# PHP Backend API
 
 Backend PHP MVC con API REST JSON${withJWT ? ' y autenticación JWT' : ''}
+
+## ⚠️ IMPORTANTE: Seguridad
+
+### Protección contra Inyección SQL
+Todos los modelos ahora requieren la propiedad **\$fillable** que define una lista blanca de columnas que pueden ser asignadas masivamente. Esto previene ataques de inyección SQL mediante manipulación de nombres de columnas.
+
+**Ejemplo seguro:**
+\`\`\`php
+class UserModel extends Model
+{
+    protected $table = 'users';
+    protected $fillable = ['email', 'password', 'name']; // Solo estas columnas
+}
+\`\`\`
+
+### Validación de Entradas
+- Todos los nombres de clases y tablas son validados contra path traversal
+- El cuerpo de las peticiones solo acepta JSON
+- Parámetros de ruta son sanitizados automáticamente
 
 ## Instalación
 
@@ -1827,12 +2121,39 @@ En cualquier controlador protegido con el middleware \`auth\`:
 use Core\\AuthMiddleware;
 
 public function myMethod()
-{
     $user = AuthMiddleware::getAuthUser();
     // $user contiene: { user_id, email, jti, iat, exp }
 }
 \`\`\`
 ` : ''}
+
+## Manejo de Métodos HTTP
+
+### APIs REST con JSON
+Para clientes API (JavaScript, mobile apps), usa los métodos reales con JSON:
+
+\`\`\`javascript
+// POST real
+fetch('/products', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'New Product', price: 100 })
+});
+
+// PUT real
+fetch('/products/1', {
+    method: 'PUT', 
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Updated Product' })
+});
+
+// DELETE real  
+fetch('/products/1', {
+    method: 'DELETE'
+});
+\`\`\`
+
+El sistema solo acepta \`application/json\` para el cuerpo de las peticiones.
 
 ## Health Check
 
@@ -1854,7 +2175,7 @@ php -S localhost:8000 -t public
 # Crear proyecto
 php-init new mi-proyecto
 
-# Generar código
+# Generar código (con validación de seguridad)
 php-init make:controller Producto
 php-init make:model Producto
 php-init make:middleware Admin
@@ -1864,17 +2185,17 @@ php-init make:test Producto
 # Utilidades
 php-init list:routes
 php-init server
+php-init db:migrate
 \`\`\`
 
-## Características
+## Características de Seguridad
 
-- ✅ **Arquitectura MVC limpia** con separación de responsabilidades
-- ✅ **Sistema de middleware robusto** para protección de rutas
-- ✅ **Generación de middlewares personalizados** con CLI
-- ✅ **Validación de datos** con reglas personalizables
-- ✅ **Rate limiting mejorado** con file locks y limpieza automática
-- ✅ **Logging estructurado** con rotación automática y sanitización de datos sensibles
-- ✅ **Manejo de errores robusto** con IDs únicos para debugging
+- ✅ **Protección contra inyección SQL** con lista blanca \$fillable
+- ✅ **Validación de path traversal** en comandos CLI
+- ✅ **Manejo de errores robusto** sin exit/die abruptos
+- ✅ **Validación estricta de JSON** en todas las peticiones
+- ✅ **Rate limiting mejorado** con timeouts y locking
+- ✅ **Logging estructurado** con sanitización de datos sensibles
 - ✅ **Sanitización** automática de parámetros de ruta
 - ✅ **Protección contra SQL Injection** con escapado de identificadores y prepared statements
 ${withJWT ? '- ✅ **Autenticación JWT** con refresh tokens y revocación' : ''}
@@ -1882,32 +2203,22 @@ ${withJWT ? '- ✅ **Autenticación JWT** con refresh tokens y revocación' : ''
 - ✅ **PSR-4 autoloading** con Composer
 - ✅ **Health checks** automáticos
 - ✅ **Múltiples entornos** de configuración
+- ✅ **Compatibilidad multi-BD** (MySQL y SQL Server)
 
-## Mejoras de Seguridad
+## Rate Limiting
 
-### SQL Injection Prevention
-Todos los nombres de tablas y columnas se escapan automáticamente usando el método \`escapeIdentifier()\` y se usan prepared statements.
+El sistema incluye rate limiting por IP (100 peticiones por minuto por defecto). Para producción con alto tráfico, se recomienda:
 
-### JWT Security
-${withJWT ? `- Validación estricta de JWT_SECRET en producción
-- Refresh tokens con rotación automática
-- Revocación de tokens (denylist) con limpieza automática
-- JWT ID único (jti) para rastreo individual` : 'No aplicable (JWT no habilitado)'}
-
-### Logging Seguro
-Los datos sensibles (passwords, tokens, secrets) se sanitizan automáticamente antes de escribirse en logs.
-
-### Rate Limiting
-- File locking para prevenir race conditions
-- Limpieza automática de entradas antiguas
-- Configurable por IP
+1. **Redis/Memcached**: Implementar almacenamiento en memoria
+2. **Múltiples servidores**: Usar almacenamiento centralizado
+3. **Configuración granular**: Ajustar límites por endpoint
 
 ## Estructura del proyecto
 
 \`\`\`
 ├── app/
 │   ├── Controllers/     # Controladores de la aplicación
-│   ├── Models/          # Modelos de datos
+│   ├── Models/          # Modelos de datos (con \$fillable)
 │   └── Routes/          # Definición de rutas
 ├── core/                # Núcleo del framework
 │   ├── Router.php       # Sistema de enrutamiento
@@ -1983,9 +2294,9 @@ RateLimit::check($clientIp, 50, 120); // 50 peticiones cada 2 minutos
 \`\`\`
 
 Características:
-- File locking para prevenir race conditions
+- File locking con timeout para prevenir race conditions
 - Limpieza automática de IPs antiguas (1% de probabilidad por request)
-- Almacenamiento en JSON con locks
+- Almacenamiento en JSON con validación
 
 ## Recomendaciones para Producción
 
@@ -2006,54 +2317,68 @@ Para más información o reportar issues, visita el repositorio del proyecto.
 // Comandos
 // ==============================
 
-async function newProject(name) {
-    const answers = await inquirer.prompt([
-        {
-            type: 'list',
-            name: 'database',
-            message: '¿Qué base de datos usarás?',
-            choices: [
-                { name: '🐬 MySQL', value: 'mysql' },
-                { name: '🔷 SQL Server', value: 'sqlsrv' }
-            ]
-        },
-        {
-            type: 'confirm',
-            name: 'withJWT',
-            message: '¿Deseas autenticación JWT?',
-            default: true
-        },
-        {
-            type: 'input',
-            name: 'dbHost',
-            message: 'Host de la base de datos:',
-            default: 'localhost'
-        },
-        {
-            type: 'input',
-            name: 'dbPort',
-            message: 'Puerto de la base de datos:',
-            default: (answers) => answers.database === 'mysql' ? '3306' : '1433'
-        },
-        {
-            type: 'input',
-            name: 'dbName',
-            message: 'Nombre de la base de datos:',
-            default: 'mi_base'
-        },
-        {
-            type: 'input',
-            name: 'dbUser',
-            message: 'Usuario de la base de datos:',
-            default: (answers) => answers.database === 'mysql' ? 'root' : 'sa'
-        },
-        {
-            type: 'password',
-            name: 'dbPass',
-            message: 'Contraseña de la base de datos:',
-            default: ''
-        }
-    ]);
+async function newProject(name, options) {
+    let answers;
+
+    if (options.database && options.dbHost && options.dbName && options.dbUser) {
+        answers = {
+            database: options.database,
+            withJWT: options.jwt,
+            dbHost: options.dbHost,
+            dbPort: options.dbPort || (options.database === 'mysql' ? '3306' : '1433'),
+            dbName: options.dbName,
+            dbUser: options.dbUser,
+            dbPass: options.dbPass || ''
+        };
+    } else {
+        answers = await inquirer.prompt([
+            {
+                type: 'list',
+                name: 'database',
+                message: '¿Qué base de datos usarás?',
+                choices: [
+                    { name: '🐬 MySQL', value: 'mysql' },
+                    { name: '🔷 SQL Server', value: 'sqlsrv' }
+                ]
+            },
+            {
+                type: 'confirm',
+                name: 'withJWT',
+                message: '¿Deseas autenticación JWT?',
+                default: true
+            },
+            {
+                type: 'input',
+                name: 'dbHost',
+                message: 'Host de la base de datos:',
+                default: 'localhost'
+            },
+            {
+                type: 'input',
+                name: 'dbPort',
+                message: 'Puerto de la base de datos:',
+                default: (answers) => answers.database === 'mysql' ? '3306' : '1433'
+            },
+            {
+                type: 'input',
+                name: 'dbName',
+                message: 'Nombre de la base de datos:',
+                default: 'mi_base'
+            },
+            {
+                type: 'input',
+                name: 'dbUser',
+                message: 'Usuario de la base de datos:',
+                default: (answers) => answers.database === 'mysql' ? 'root' : 'sa'
+            },
+            {
+                type: 'password',
+                name: 'dbPass',
+                message: 'Contraseña de la base de datos:',
+                default: ''
+            }
+        ]);
+    }
 
     const base = path.join(process.cwd(), name);
     if (exists(base)) error(`"${name}" ya existe.`);
@@ -2136,10 +2461,8 @@ JWT_REFRESH_TOKEN_EXPIRATION=2592000
     console.log(`\n➡️  cd ${name}`);
     console.log(`   composer install`);
     if (answers.withJWT) {
-        console.log(`   # Ejecuta las migraciones de la base de datos en orden:`);
-        console.log(`   # 1. database/migrations/users.sql`);
-        console.log(`   # 2. database/migrations/jwt_denylist.sql`);
-        console.log(`   # 3. database/migrations/refresh_tokens.sql`);
+        console.log(`   # Ejecuta las migraciones de la base de datos:`);
+        console.log(`   php-init db:migrate`);
     }
     console.log(`   php-init server\n`);
 }
@@ -2147,112 +2470,162 @@ JWT_REFRESH_TOKEN_EXPIRATION=2592000
 async function makeController(name) {
     if (!inProject()) error('No estás en un proyecto.');
 
-    const className = cap(name) + 'Controller';
-    const file = path.join(process.cwd(), 'app/Controllers', `${className}.php`);
+    try {
+        name = ensureSafeName(sanitizeClassName(name, 'controlador'), 'controlador');
+        const className = cap(name) + 'Controller';
+        const file = path.join(process.cwd(), 'app/Controllers', `${className}.php`);
 
-    if (exists(file)) return warn(`${className}.php ya existe.`);
+        if (exists(file)) return warn(`${className}.php ya existe.`);
 
-    const model = cap(name) + 'Model';
-    write(process.cwd(), `app/Controllers/${className}.php`, t.crudController(className, model));
-    success(`Creado: app/Controllers/${className}.php`);
+        const model = cap(name) + 'Model';
+        write(process.cwd(), `app/Controllers/${className}.php`, t.crudController(className, model));
+        success(`Creado: app/Controllers/${className}.php`);
+    } catch (err) {
+        error(`Error de seguridad: ${err.message}`);
+    }
 }
 
 async function makeModel(name, tableName) {
     if (!inProject()) error('No estás en un proyecto.');
 
-    let finalTableName = tableName;
+    try {
+        name = ensureSafeName(sanitizeClassName(name, 'modelo'), 'modelo');
 
-    if (!finalTableName) {
-        const answers = await inquirer.prompt([
-            {
-                type: 'input',
-                name: 'tableNamePrompt',
-                message: 'Nombre de la tabla en la BD:',
-                default: name.toLowerCase() + 's'
-            }
-        ]);
-        finalTableName = answers.tableNamePrompt;
+        let finalTableName = tableName;
+        if (!finalTableName) {
+            const answers = await inquirer.prompt([
+                {
+                    type: 'input',
+                    name: 'tableNamePrompt',
+                    message: 'Nombre de la tabla en la BD:',
+                    default: name.toLowerCase() + 's',
+                    validate: (input) => {
+                        try {
+                            ensureSafeName(sanitizeTableName(input), 'tabla');
+                            return true;
+                        } catch (err) {
+                            return err.message;
+                        }
+                    }
+                }
+            ]);
+            finalTableName = answers.tableNamePrompt;
+        } else {
+            finalTableName = ensureSafeName(sanitizeTableName(finalTableName), 'tabla');
+        }
+
+        const className = cap(name) + 'Model';
+        const file = path.join(process.cwd(), 'app/Models', `${className}.php`);
+
+        if (exists(file)) return warn(`${className}.php ya existe.`);
+
+        write(process.cwd(), `app/Models/${className}.php`, t.crudModel(className, finalTableName));
+        success(`Creado: app/Models/${className}.php`);
+
+        console.log('\n📝 Recuerda definir la propiedad $fillable en el modelo:');
+        console.log(`   protected $fillable = ['columna1', 'columna2'];`);
+    } catch (err) {
+        error(`Error de seguridad: ${err.message}`);
     }
-
-    const className = cap(name) + 'Model';
-    const file = path.join(process.cwd(), 'app/Models', `${className}.php`);
-
-    if (exists(file)) return warn(`${className}.php ya existe.`);
-
-    write(process.cwd(), `app/Models/${className}.php`, t.crudModel(className, finalTableName));
-    success(`Creado: app/Models/${className}.php`);
 }
 
 async function makeMiddleware(name) {
     if (!inProject()) error('No estás en un proyecto.');
 
-    const className = cap(name) + 'Middleware';
-    const file = path.join(process.cwd(), 'core', `${className}.php`);
+    try {
+        name = ensureSafeName(sanitizeClassName(name, 'middleware'), 'middleware');
+        const className = cap(name) + 'Middleware';
+        const file = path.join(process.cwd(), 'core', `${className}.php`);
 
-    if (exists(file)) return warn(`${className}.php ya existe.`);
+        if (exists(file)) return warn(`${className}.php ya existe.`);
 
-    write(process.cwd(), `core/${className}.php`, t.customMiddleware(className));
-    success(`Creado: core/${className}.php`);
+        write(process.cwd(), `core/${className}.php`, t.customMiddleware(className));
+        success(`Creado: core/${className}.php`);
 
-    console.log(`\n📝 Próximos pasos:`);
-    console.log(`   1. Implementa la lógica en: core/${className}.php`);
-    console.log(`   2. Registra el middleware en public/index.php:`);
-    console.log(`      Middleware::register('${name.toLowerCase()}', 'Core\\\\${className}::handle');`);
-    console.log(`   3. Usa el middleware en tus rutas:`);
-    console.log(`      $router->get('/ruta', 'Controller', 'method')->middleware('${name.toLowerCase()}');\n`);
+        console.log(`\n📝 Próximos pasos:`);
+        console.log(`   1. Implementa la lógica en: core/${className}.php`);
+        console.log(`   2. Registra el middleware en public/index.php:`);
+        console.log(`      Middleware::register('${name.toLowerCase()}', 'Core\\\\${className}::handle');`);
+        console.log(`   3. Usa el middleware en tus rutas:`);
+        console.log(`      $router->get('/ruta', 'Controller', 'method')->middleware('${name.toLowerCase()}');\n`);
+    } catch (err) {
+        error(`Error de seguridad: ${err.message}`);
+    }
 }
 
 async function makeCrud(name) {
     if (!inProject()) error('No estás en un proyecto.');
 
-    const answers = await inquirer.prompt([
-        {
-            type: 'input',
-            name: 'tableName',
-            message: 'Nombre de la tabla en la BD:',
-            default: name.toLowerCase() + 's'
+    try {
+        name = ensureSafeName(sanitizeClassName(name, 'CRUD'), 'CRUD');
+
+        const answers = await inquirer.prompt([
+            {
+                type: 'input',
+                name: 'tableName',
+                message: 'Nombre de la tabla en la BD:',
+                default: name.toLowerCase() + 's',
+                validate: (input) => {
+                    try {
+                        ensureSafeName(sanitizeTableName(input), 'tabla');
+                        return true;
+                    } catch (err) {
+                        return err.message;
+                    }
+                }
+            }
+        ]);
+
+        const className = cap(name) + 'Model';
+        const modelFile = path.join(process.cwd(), 'app/Models', `${className}.php`);
+
+        if (!exists(modelFile)) {
+            write(process.cwd(), `app/Models/${className}.php`, t.crudModel(className, answers.tableName));
+            success(`Creado: app/Models/${className}.php`);
         }
-    ]);
 
-    const className = cap(name) + 'Model';
-    const modelFile = path.join(process.cwd(), 'app/Models', `${className}.php`);
+        await makeController(name);
 
-    if (!exists(modelFile)) {
-        write(process.cwd(), `app/Models/${className}.php`, t.crudModel(className, answers.tableName));
-        success(`Creado: app/Models/${className}.php`);
-    }
+        const routesFile = path.join(process.cwd(), 'app/Routes/web.php');
+        if (!exists(routesFile)) error('No se encontró web.php');
 
-    await makeController(name);
+        const controller = cap(name) + 'Controller';
+        const route = `/${name.toLowerCase()}s`;
 
-    const routesFile = path.join(process.cwd(), 'app/Routes/web.php');
-    if (!exists(routesFile)) error('No se encontró web.php');
-
-    const controller = cap(name) + 'Controller';
-    const route = `/${name.toLowerCase()}s`;
-
-    const routes = `
+        const routes = `
 // CRUD ${cap(name)}
 $router->get('${route}', '${controller}', 'index');
 $router->get('${route}/{id}', '${controller}', 'show');
 $router->post('${route}', '${controller}', 'store');
-$router->post('${route}/{id}', '${controller}', 'update');
-$router->post('${route}/{id}/delete', '${controller}', 'destroy');
+$router->put('${route}/{id}', '${controller}', 'update');
+$router->delete('${route}/{id}', '${controller}', 'destroy');
 `;
 
-    fs.appendFileSync(routesFile, routes);
-    success('CRUD completo creado.');
+        fs.appendFileSync(routesFile, routes);
+        success('CRUD completo creado.');
+
+        console.log('\n📝 Recuerda definir $fillable en el modelo:');
+        console.log(`   protected $fillable = ['columna1', 'columna2'];`);
+    } catch (err) {
+        error(`Error de seguridad: ${err.message}`);
+    }
 }
 
 async function makeTest(name) {
     if (!inProject()) error('No estás en un proyecto.');
 
-    const className = cap(name) + 'Test';
-    const file = path.join(process.cwd(), 'tests', `${className}.php`);
+    try {
+        name = ensureSafeName(sanitizeClassName(name, 'test'), 'test');
+        const className = cap(name) + 'Test';
+        const file = path.join(process.cwd(), 'tests', `${className}.php`);
 
-    if (exists(file)) return warn(`${className}.php ya existe.`);
+        if (exists(file)) return warn(`${className}.php ya existe.`);
 
-    write(process.cwd(), `tests/${className}.php`, t.testTemplate(name));
-    success(`Creado: tests/${className}.php`);
+        write(process.cwd(), `tests/${className}.php`, t.testTemplate(name));
+        success(`Creado: tests/${className}.php`);
+    } catch (err) {
+        error(`Error de seguridad: ${err.message}`);
+    }
 }
 
 function listRoutes() {
@@ -2262,7 +2635,7 @@ function listRoutes() {
     if (!exists(file)) error('No se encontró web.php');
 
     const content = fs.readFileSync(file, 'utf8');
-    const regex = /\$router->(get|post|put|delete)\s*\(\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)(?:->middleware\((.*?)\))?/g;
+    const regex = /\$router->(get|post|put|delete)\s*\(\s*(['"])([^'"]+)\2\s*,\s*(['"])([^'"]+)\4\s*,\s*(['"])([^'"]+)\6\s*\)(?:->middleware\s*\(\s*(.*?)\s*\))?/g;
 
     console.log('\n📋 Rutas registradas:');
     console.log('-'.repeat(90));
@@ -2292,9 +2665,10 @@ async function startServer() {
             default: 'localhost',
             validate: (input) => {
                 if (!input) return 'El host no puede estar vacío.';
-                if (/[^a-zA-Z0-9.-]/.test(input)) {
+                if (!/^[a-zA-Z0-9.-]+$/.test(input)) {
                     return 'Host inválido. Solo se permiten caracteres alfanuméricos, puntos y guiones.';
                 }
+                if (input.length > 253) return 'Host demasiado largo.';
                 return true;
             }
         },
@@ -2318,7 +2692,6 @@ async function startServer() {
     console.log('\n🚀 Iniciando servidor de desarrollo...');
     console.log(`📡 Servidor corriendo en: http://${host}:${port}`);
     console.log('⏹️  Presiona Ctrl+C para detener\n');
-
     const server = spawn('php', [
         '-S',
         `${host}:${port}`,
@@ -2326,11 +2699,18 @@ async function startServer() {
         'public'
     ], {
         stdio: 'inherit',
-        shell: true
+        shell: false,
+        windowsHide: true
     });
 
     server.on('error', (err) => {
-        error(`Error al iniciar servidor: ${err.message}`);
+        if (err.code === 'EACCES') {
+            error(`Puerto ${port} requiere privilegios de administrador`);
+        } else if (err.code === 'EADDRINUSE') {
+            error(`Puerto ${port} ya está en uso`);
+        } else {
+            error(`Error del servidor: ${err.message}`);
+        }
     });
 
     server.on('close', (code) => {
@@ -2348,6 +2728,224 @@ async function startServer() {
     });
 }
 
+async function runMigrations() {
+    if (!inProject()) error('No estás en un proyecto.');
+    const envPath = path.join(process.cwd(), '.env');
+    if (!exists(envPath)) {
+        error('No se encontró el archivo .env. Ejecuta primero: php-init new nombre-proyecto');
+    }
+    const envContent = fs.readFileSync(envPath, 'utf8');
+    const envVars = {};
+    envContent.split('\n').forEach(line => {
+        const [key, value] = line.split('=');
+        if (key && value) {
+            envVars[key.trim()] = value.trim();
+        }
+    });
+
+    const dbType = envVars.DB_TYPE || 'mysql';
+    const dbHost = envVars.DB_HOST || 'localhost';
+    const dbPort = envVars.DB_PORT || (dbType === 'mysql' ? '3306' : '1433');
+    const dbName = envVars.DB_NAME || 'mi_base';
+    const dbUser = envVars.DB_USER || (dbType === 'mysql' ? 'root' : 'sa');
+    const dbPass = envVars.DB_PASS || '';
+
+    // Sanitize DB identifiers to prevent command/SQL injection
+    const sanitizeIdent = (input, { allowDot = false } = {}) => {
+        if (typeof input !== 'string') return '';
+        // Keep strict: letters, numbers and underscore only
+        // Dots and dashes are disallowed to avoid schema/table chaining
+        const safe = input.replace(/[^a-zA-Z0-9_]/g, '');
+        // Enforce reasonable length (MySQL identifier max 64)
+        return safe.slice(0, 64);
+    };
+
+    const sanitizedDbHost = sanitizeIdent(dbHost);
+    const sanitizedDbName = sanitizeIdent(dbName);
+    const sanitizedDbUser = sanitizeIdent(dbUser);
+
+    // Validaciones adicionales para credenciales de BD
+    if (typeof dbPass !== 'string') {
+        error('DB_PASS inválido');
+    }
+    if (dbPass.length > 128 || /[\r\n\0]/.test(dbPass)) {
+        error('DB_PASS contiene caracteres no permitidos o es demasiado largo');
+    }
+    const portNum = parseInt(dbPort);
+    if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+        error('DB_PORT inválido (1-65535)');
+    }
+
+    if (dbHost !== sanitizedDbHost || dbName !== sanitizedDbName || dbUser !== sanitizedDbUser) {
+        error('Caracteres inválidos detectados en los parámetros de conexión a la base de datos.');
+    }
+
+    if (!sanitizedDbName) {
+        error('DB_NAME no está configurado en el archivo .env');
+    }
+
+    const migrationsDir = path.join(process.cwd(), 'database/migrations');
+    if (!exists(migrationsDir)) {
+        error('No se encontró el directorio de migraciones. ¿Has creado el proyecto con autenticación JWT?');
+    }
+    // Verificar archivos de migración
+    const migrationFiles = [
+        'users.sql',
+        'jwt_denylist.sql',
+        'refresh_tokens.sql'
+    ];
+    const missingMigrations = migrationFiles.filter(file =>
+        !exists(path.join(migrationsDir, file))
+    );
+    if (missingMigrations.length > 0) {
+        error(`Faltan archivos de migración: ${missingMigrations.join(', ')}`);
+    }
+
+    console.log('📦 Ejecutando migraciones de base de datos...');
+    console.log(`🔗 Conectando a: ${dbType}://${dbUser}@${dbHost}:${dbPort}/${dbName}`);
+    try {
+        // Crear conexión a la base de datos
+        let connection;
+        if (dbType === 'mysql') {
+            const mysql = await import('mysql2/promise');
+            // 1. Connect to MySQL server without specifying a database
+            const tempConnection = await mysql.createConnection({
+                host: sanitizedDbHost,
+                port: parseInt(dbPort),
+                user: sanitizedDbUser,
+                password: dbPass
+            });
+
+            // 2. Create the database if it doesn't exist
+            await tempConnection.execute(`CREATE DATABASE IF NOT EXISTS \`${sanitizedDbName}\``);
+            await tempConnection.end();
+
+            // 3. Now, connect to the specific database
+            connection = await mysql.createConnection({
+                host: sanitizedDbHost,
+                port: parseInt(dbPort),
+                user: sanitizedDbUser,
+                password: dbPass,
+                database: sanitizedDbName,
+                multipleStatements: false
+            });
+
+        } else {
+            // SQL Server
+            const tedious = await import('tedious');
+            const { Connection } = tedious;
+            connection = await new Promise((resolve, reject) => {
+                const config = {
+                    server: sanitizedDbHost,
+                    authentication: {
+                        type: 'default',
+                        options: {
+                            userName: sanitizedDbUser,
+                            password: dbPass
+                        }
+                    },
+                    options: {
+                        port: parseInt(dbPort),
+                        encrypt: false,
+                        trustServerCertificate: true
+                    }
+                };
+                const conn = new Connection(config);
+                conn.on('connect', (err) => {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve(conn);
+                    }
+                });
+                conn.connect();
+            });
+
+        }
+        // Verificar/Crear base de datos
+        try {
+            if (dbType === 'mysql') {
+                await connection.execute(`CREATE DATABASE IF NOT EXISTS \`${sanitizedDbName}\``);
+                await connection.execute(`USE \`${sanitizedDbName}\``);
+            } else {
+                // Para SQL Server, asumimos que la base de datos ya existe
+                // o el usuario tiene permisos para crearla
+                console.log('⚠️  Para SQL Server, asegúrate de que la base de datos exista');
+            }
+        } catch (e) {
+            console.log('ℹ️  Usando base de datos existente...', e.message);
+        }
+        // Ejecutar migraciones en orden
+        for (const migrationFile of migrationFiles) {
+            const migrationPath = path.join(migrationsDir, migrationFile);
+            const sql = fs.readFileSync(migrationPath, 'utf8');
+            console.log(`\n🔄 Ejecutando: ${migrationFile}`);
+            try {
+                if (dbType === 'mysql') {
+                    const statements = sql.split(';').filter(stmt => stmt.trim());
+                    for (const statement of statements) {
+                        if (statement.trim()) {
+                            if (statement.trim().toUpperCase().startsWith('CREATE TABLE') ||
+                                statement.trim().toUpperCase().startsWith('CREATE INDEX') ||
+                                statement.trim().toUpperCase().startsWith('ALTER TABLE') ||
+                                statement.trim().toUpperCase().startsWith('DROP TABLE') ||
+                                statement.trim().toUpperCase().startsWith('DROP INDEX')) {
+                                await connection.query(statement);
+                            } else {
+                                await connection.execute(statement);
+                            }
+                        }
+                    }
+                } else {
+                    const statements = sql.split(';').filter(stmt => stmt.trim());
+                    for (const statement of statements) {
+                        if (statement.trim()) {
+                            await new Promise((resolve, reject) => {
+                                const request = new tedious.Request(statement.trim(), (err) => {
+                                    if (err) reject(err);
+                                    else resolve();
+                                });
+                                connection.execSql(request);
+                            });
+                        }
+                    }
+                }
+                success(`✅ ${migrationFile} completado`);
+            } catch (migrationError) {
+                if (migrationError.code === 'ER_TABLE_EXISTS_ERROR' ||
+                    migrationError.code === 'ER_DUP_KEYNAME' ||
+                    migrationError.message?.includes('already exists')) {
+                    warn(`⚠️  ${migrationFile} ya estaba aplicado`);
+                } else {
+                    throw migrationError;
+                }
+            }
+        }
+        if (dbType === 'mysql') {
+            await connection.end();
+        } else {
+            connection.close();
+        }
+        success('\n🎉 ¡Todas las migraciones se ejecutaron correctamente!');
+        console.log('\n📊 Tablas creadas:');
+        console.log('   ✅ users - Tabla de usuarios para autenticación');
+        console.log('   ✅ jwt_denylist - Lista negra de tokens JWT revocados');
+        console.log('   ✅ refresh_tokens - Almacenamiento seguro de refresh tokens');
+    } catch (error) {
+        console.error('\n❌ Error ejecutando migraciones:');
+        console.error(`   Mensaje: ${error.message}`);
+        console.error(`   Código: ${error.code}`);
+        console.error('\n💡 Solución:');
+        console.error('   1. Verifica que tu servidor de base de datos esté corriendo');
+        console.error('   2. Confirma las credenciales en el archivo .env');
+        console.error('   3. Asegúrate de que la base de datos exista');
+        if (dbType === 'mysql') {
+            console.error('   4. Para MySQL: GRANT ALL PRIVILEGES ON *.* TO usuario@localhost');
+        }
+        process.exit(1);
+    }
+}
+
 // ==============================
 // CLI
 // ==============================
@@ -2355,6 +2953,13 @@ async function startServer() {
 program
     .command('new <nombre>')
     .description('Crea un nuevo proyecto PHP MVC')
+    .option('--database <type>', 'Tipo de base de datos (mysql o sqlsrv)')
+    .option('--jwt', 'Incluir autenticación JWT')
+    .option('--db-host <host>', 'Host de la base de datos')
+    .option('--db-port <port>', 'Puerto de la base de datos')
+    .option('--db-name <name>', 'Nombre de la base de datos')
+    .option('--db-user <user>', 'Usuario de la base de datos')
+    .option('--db-pass <pass>', 'Contraseña de la base de datos')
     .action(newProject);
 
 program
@@ -2392,4 +2997,8 @@ program
     .description('Inicia el servidor de desarrollo')
     .action(startServer);
 
-program.parse();
+program.command('db:migrate')
+    .description('Ejecuta las migraciones de la base de datos')
+    .action(runMigrations);
+
+program.parse(process.argv);
