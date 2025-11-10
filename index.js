@@ -1915,13 +1915,13 @@ class ${name} extends Controller
     }
 }`,
 
-    crudModel: (name, table) => `<?php
+    crudModel: (name, table, fillable = []) => `<?php
 namespace App\\Models;
 
 class ${name} extends Model
 {
     protected $table = '${table}';
-    protected $fillable = []; // ¡DEFINIR columnas permitidas para asignación masiva!
+    protected $fillable = [${fillable.length > 0 ? `'${fillable.join("', '")}'` : ''}];${fillable.length === 0 ? ' // ¡DEFINIR columnas permitidas para asignación masiva!' : ''}
 }`,
 
     testTemplate: (name) => `<?php
@@ -2514,16 +2514,52 @@ async function makeModel(name, tableName) {
             finalTableName = ensureSafeName(sanitizeTableName(finalTableName), 'tabla');
         }
 
+        // Preguntar por columnas fillable
+        const fillableAnswers = await inquirer.prompt([
+            {
+                type: 'confirm',
+                name: 'defineFillable',
+                message: '¿Quieres definir las columnas fillable ahora?',
+                default: false
+            }
+        ]);
+
+        let fillableColumns = [];
+        if (fillableAnswers.defineFillable) {
+            const columnsAnswer = await inquirer.prompt([
+                {
+                    type: 'input',
+                    name: 'columns',
+                    message: 'Introduce los nombres de las columnas fillable (separados por comas):',
+                    validate: (input) => {
+                        if (!input.trim()) return 'Debes introducir al menos una columna';
+                        const cols = input.split(',').map(c => c.trim()).filter(c => c);
+                        if (cols.length === 0) return 'Debes introducir al menos una columna';
+                        // Validar que cada columna sea un nombre válido
+                        for (const col of cols) {
+                            if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(col)) {
+                                return `Nombre de columna inválido: "${col}". Solo a-z, A-Z, 0-9, _, empezando con letra o _.`;
+                            }
+                        }
+                        return true;
+                    }
+                }
+            ]);
+            fillableColumns = columnsAnswer.columns.split(',').map(c => c.trim()).filter(c => c);
+        }
+
         const className = cap(name) + 'Model';
         const file = path.join(process.cwd(), 'app/Models', `${className}.php`);
 
         if (exists(file)) return warn(`${className}.php ya existe.`);
 
-        write(process.cwd(), `app/Models/${className}.php`, t.crudModel(className, finalTableName));
+        write(process.cwd(), `app/Models/${className}.php`, t.crudModel(className, finalTableName, fillableColumns));
         success(`Creado: app/Models/${className}.php`);
 
-        console.log('\n📝 Recuerda definir la propiedad $fillable en el modelo:');
-        console.log(`   protected $fillable = ['columna1', 'columna2'];`);
+        if (fillableColumns.length === 0) {
+            console.log('\n📝 Recuerda definir la propiedad $fillable en el modelo:');
+            console.log(`   protected $fillable = ['columna1', 'columna2'];`);
+        }
     } catch (err) {
         error(`Error de seguridad: ${err.message}`);
     }
@@ -2579,8 +2615,42 @@ async function makeCrud(name) {
         const className = cap(name) + 'Model';
         const modelFile = path.join(process.cwd(), 'app/Models', `${className}.php`);
 
+        let fillableColumns = [];
         if (!exists(modelFile)) {
-            write(process.cwd(), `app/Models/${className}.php`, t.crudModel(className, answers.tableName));
+            // Preguntar por columnas fillable
+            const fillableAnswers = await inquirer.prompt([
+                {
+                    type: 'confirm',
+                    name: 'defineFillable',
+                    message: '¿Quieres definir las columnas fillable ahora?',
+                    default: false
+                }
+            ]);
+
+            if (fillableAnswers.defineFillable) {
+                const columnsAnswer = await inquirer.prompt([
+                    {
+                        type: 'input',
+                        name: 'columns',
+                        message: 'Introduce los nombres de las columnas fillable (separados por comas):',
+                        validate: (input) => {
+                            if (!input.trim()) return 'Debes introducir al menos una columna';
+                            const cols = input.split(',').map(c => c.trim()).filter(c => c);
+                            if (cols.length === 0) return 'Debes introducir al menos una columna';
+                            // Validar que cada columna sea un nombre válido
+                            for (const col of cols) {
+                                if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(col)) {
+                                    return `Nombre de columna inválido: "${col}". Solo a-z, A-Z, 0-9, _, empezando con letra o _.`;
+                                }
+                            }
+                            return true;
+                        }
+                    }
+                ]);
+                fillableColumns = columnsAnswer.columns.split(',').map(c => c.trim()).filter(c => c);
+            }
+
+            write(process.cwd(), `app/Models/${className}.php`, t.crudModel(className, answers.tableName, fillableColumns));
             success(`Creado: app/Models/${className}.php`);
         }
 
@@ -2604,8 +2674,10 @@ $router->delete('${route}/{id}', '${controller}', 'destroy');
         fs.appendFileSync(routesFile, routes);
         success('CRUD completo creado.');
 
-        console.log('\n📝 Recuerda definir $fillable en el modelo:');
-        console.log(`   protected $fillable = ['columna1', 'columna2'];`);
+        if (fillableColumns.length === 0) {
+            console.log('\n📝 Recuerda definir $fillable en el modelo:');
+            console.log(`   protected $fillable = ['columna1', 'columna2'];`);
+        }
     } catch (err) {
         error(`Error de seguridad: ${err.message}`);
     }
@@ -2750,13 +2822,9 @@ async function runMigrations() {
     const dbUser = envVars.DB_USER || (dbType === 'mysql' ? 'root' : 'sa');
     const dbPass = envVars.DB_PASS || '';
 
-    // Sanitize DB identifiers to prevent command/SQL injection
     const sanitizeIdent = (input, { allowDot = false } = {}) => {
         if (typeof input !== 'string') return '';
-        // Keep strict: letters, numbers and underscore only
-        // Dots and dashes are disallowed to avoid schema/table chaining
         const safe = input.replace(/[^a-zA-Z0-9_]/g, '');
-        // Enforce reasonable length (MySQL identifier max 64)
         return safe.slice(0, 64);
     };
 
