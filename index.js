@@ -15,7 +15,24 @@ const program = new Command();
 program
     .name("php-init")
     .description("CLI para crear backend PHP MVC con API REST JSON")
-    .version("1.0.0");
+    .version("1.0.0")
+    .addHelpText('after', `
+Ejemplos de uso:
+  $ php-init new mi-proyecto --database mysql --jwt
+  $ php-init make:crud Product
+  $ php-init make:controller User
+  $ php-init make:model Post posts
+  $ php-init db:migrate
+  $ php-init server
+  
+Flujo típico:
+  1. php-init new mi-api --database mysql --jwt
+  2. cd mi-api
+  3. composer install
+  4. php-init db:migrate
+  5. php-init make:crud Product
+  6. php-init server
+`);
 
 // ==============================
 // Utilidades simples
@@ -2539,6 +2556,16 @@ Para más información o reportar issues, visita el repositorio del proyecto.
 // ==============================
 
 async function newProject(name, options) {
+    try {
+        name = ensureSafeName(sanitizeClassName(name, 'proyecto'), 'proyecto');
+    } catch (err) {
+        error(`Nombre de proyecto inválido: ${err.message}`);
+    }
+
+    if (options.database && !['mysql', 'sqlsrv'].includes(options.database)) {
+        error('--database debe ser "mysql" o "sqlsrv"');
+    }
+
     let answers;
 
     if (options.database && options.dbHost && options.dbName && options.dbUser) {
@@ -3513,6 +3540,11 @@ program
     .option('--db-name <name>', 'Nombre de la base de datos')
     .option('--db-user <user>', 'Usuario de la base de datos')
     .option('--db-pass <pass>', 'Contraseña de la base de datos')
+    .addHelpText('after', `
+Ejemplos:
+  $ php-init new mi-api --database mysql --jwt --db-host localhost --db-name test --db-user root
+  $ php-init new blog --database sqlsrv --db-host localhost --db-name blog_db --db-user sa --db-pass MyPass123
+`)
     .action(newProject);
 
 program
@@ -3533,6 +3565,15 @@ program
 program
     .command('make:crud <nombre>')
     .description('Crea controlador, modelo y rutas CRUD')
+    .addHelpText('after', `
+Ejemplo:
+  $ php-init make:crud Product
+  
+Esto creará:
+  - app/Controllers/ProductController.php
+  - app/Models/ProductModel.php
+  - Rutas en app/Routes/web.php
+`)
     .action(makeCrud);
 
 program
@@ -3557,6 +3598,13 @@ program.command('db:migrate')
 program.command('db:fresh')
     .description('Elimina la base de datos y ejecuta todas las migraciones')
     .option('-f, --force', 'Forzar sin confirmación (usar con precaución)')
+    .addHelpText('after', `
+⚠️  ADVERTENCIA: Este comando ELIMINARÁ todos los datos de la base de datos.
+
+Ejemplos:
+  $ php-init db:fresh          # Con confirmación interactiva
+  $ php-init db:fresh --force  # Sin confirmación (peligroso)
+`)
     .action(dbFresh);
 
 program.command('make:auth-reset')
