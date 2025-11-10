@@ -1,6 +1,6 @@
 {
   "name": "php-init",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "CLI para generar backend PHP MVC con API REST JSON",
   "main": "index.js",
   "type": "module",
@@ -17,7 +17,10 @@
     "backend",
     "api",
     "rest",
-    "json"
+    "json",
+    "jwt",
+    "docker",
+    "pagination"
   ],
   "author": "J-FREM",
   "license": "MIT",

@@ -98,21 +98,73 @@ php-init new <nombre>
 
 Crea un nuevo proyecto PHP MVC con toda la estructura necesaria.
 
-#### Opciones no interactivas
+### Base de Datos
 
-También puedes crear un proyecto de forma no interactiva usando las siguientes opciones:
+#### Ejecutar Migraciones
 
 ```bash
-php-init new <nombre> --database <type> --jwt --db-host <host> --db-port <port> --db-name <name> --db-user <user> --db-pass <pass>
+php-init db:migrate
 ```
 
--   `--database <type>`: Tipo de base de datos (mysql o sqlsrv)
--   `--jwt`: Incluir autenticación JWT
--   `--db-host <host>`: Host de la base de datos
--   `--db-port <port>`: Puerto de la base de datos
--   `--db-name <name>`: Nombre de la base de datos
--   `--db-user <user>`: Usuario de la base de datos
--   `--db-pass <pass>`: Contraseña de la base de datos
+Ejecuta todas las migraciones SQL en el orden correcto.
+
+**Orden de Ejecución**:
+1. `users.sql` - Tabla de usuarios (base)
+2. `jwt_denylist.sql` - Lista negra de tokens
+3. `refresh_tokens.sql` - Tokens de refresco (FK a users)
+4. `password_resets.sql` - Recuperación de contraseña (FK a users vía email)
+5. Cualquier otra migración (orden alfabético)
+
+**Nota**: Las migraciones se ejecutan en orden de dependencias automáticamente.
+
+#### Refrescar Base de Datos
+
+```bash
+php-init db:fresh
+```
+
+⚠️ **CUIDADO**: Elimina la base de datos completa y vuelve a ejecutar todas las migraciones. Útil para desarrollo.
+
+**Opciones**:
+- `-f, --force` - Forzar sin confirmación (útil para CI/CD)
+
+```bash
+# Con confirmación interactiva (por defecto)
+php-init db:fresh
+
+# Sin confirmación (para scripts automatizados)
+php-init db:fresh --force
+php-init db:fresh -f
+```
+
+**⚠️ Advertencia**: Usar `--force` solo en ambientes de desarrollo o CI/CD. Nunca en producción.
+
+### Autenticación
+
+#### Generar Sistema de Recuperación de Contraseña
+
+```bash
+php-init make:auth-reset
+```
+
+Genera automáticamente:
+- Migración de tabla `password_resets`
+- Modelo `PasswordResetModel`
+- Métodos en `AuthController`: `forgotPassword()` y `resetPassword()`
+- Rutas: `/auth/forgot-password` y `/auth/reset-password`
+
+### Docker
+
+#### Generar Configuración Docker
+
+```bash
+php-init init:docker
+```
+
+Genera archivos para contenedores Docker:
+- `docker-compose.yml` - Orquestación de servicios (PHP, MySQL/SQL Server, Redis)
+- `Dockerfile` - Imagen PHP con extensiones necesarias
+- `.dockerignore` - Exclusión de archivos innecesarios
 
 ### Generar Código
 
@@ -335,6 +387,176 @@ JWT_REFRESH_TOKEN_EXPIRATION=2592000    # 30 días
 - Único y aleatorio
 - Mínimo 32 caracteres
 - Diferente del valor por defecto
+
+### Recuperación de Contraseña
+
+Genera el sistema completo de recuperación de contraseña:
+
+```bash
+php-init make:auth-reset
+php-init db:migrate
+```
+
+#### Solicitar Recuperación
+
+```bash
+POST /auth/forgot-password
+Content-Type: application/json
+
+{
+  "email": "usuario@example.com"
+}
+```
+
+**Respuesta:**
+
+```json
+{
+  "success": true,
+  "message": "Token de recuperación generado",
+  "token": "abc123..." // Solo en desarrollo
+}
+```
+
+**Nota:** En producción, el token se enviará por email (debes implementar el envío de correos).
+
+#### Restablecer Contraseña
+
+```bash
+POST /auth/reset-password
+Content-Type: application/json
+
+{
+  "token": "abc123...",
+  "password": "nueva_password123"
+}
+```
+
+**Respuesta:**
+
+```json
+{
+  "success": true,
+  "message": "Contraseña restablecida correctamente"
+}
+```
+
+**Características de Seguridad:**
+- Tokens con hash SHA-256
+- Expiración configurable (1 hora por defecto)
+- Un token por email (se elimina el anterior)
+- Limpieza automática de tokens expirados
+
+---
+
+## 📄 Paginación de Respuestas
+
+El sistema incluye un helper para paginación estandarizada:
+
+```php
+use Core\Response;
+
+public function index()
+{
+    $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
+    $perPage = isset($_GET['per_page']) ? (int)$_GET['per_page'] : 10;
+    
+    // Validar límites
+    $perPage = min(max($perPage, 1), 100); // Entre 1 y 100
+    $page = max($page, 1);
+    
+    // Obtener total de registros
+    $stmt = $this->db->query("SELECT COUNT(*) as total FROM products");
+    $total = $stmt->fetch()['total'];
+    
+    // Obtener datos paginados
+    $offset = ($page - 1) * $perPage;
+    $stmt = $this->db->prepare("SELECT * FROM products LIMIT ? OFFSET ?");
+    $stmt->execute([$perPage, $offset]);
+    $products = $stmt->fetchAll();
+    
+    Response::paginated($products, $page, $perPage, $total, 'Productos obtenidos');
+}
+```
+
+**Respuesta:**
+
+```json
+{
+  "success": true,
+  "message": "Productos obtenidos",
+  "data": [
+    {"id": 1, "name": "Producto 1"},
+    {"id": 2, "name": "Producto 2"}
+  ],
+  "meta": {
+    "page": 1,
+    "per_page": 10,
+    "total": 45,
+    "total_pages": 5,
+    "has_next_page": true,
+    "has_prev_page": false
+  }
+}
+```
+
+---
+
+## 🐳 Docker
+
+Genera archivos de configuración para Docker:
+
+```bash
+php-init init:docker
+```
+
+### Archivos Generados
+
+- **docker-compose.yml**: Servicios PHP + DB + Redis
+- **Dockerfile**: Imagen PHP con extensiones necesarias
+- **.dockerignore**: Exclusión de archivos
+
+### Uso
+
+```bash
+# Iniciar servicios
+docker-compose up -d
+
+# Instalar dependencias
+docker-compose exec app composer install
+
+# Ejecutar migraciones
+docker-compose exec app php-init db:migrate
+
+# Ver logs
+docker-compose logs -f app
+
+# Detener servicios
+docker-compose down
+```
+
+### Servicios Incluidos
+
+- **app**: PHP 8.2 CLI (puerto 8000)
+- **mysql/sqlserver**: Base de datos (puerto 3306/1433)
+- **redis**: Caché/Sessions (puerto 6379)
+
+### Variables de Entorno
+
+El `docker-compose.yml` usa variables de tu archivo `.env`:
+
+```env
+APP_NAME=mi_proyecto
+APP_PORT=8000
+DB_TYPE=mysql
+DB_HOST=mysql  # Nombre del servicio Docker
+DB_PORT=3306
+DB_NAME=mi_base
+DB_USER=user
+DB_PASS=secret
+REDIS_HOST=redis
+REDIS_PORT=6379
+```
 
 ---
 

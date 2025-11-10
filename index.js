@@ -625,6 +625,33 @@ class Response
         if ($errors !== null) $response['errors'] = $errors;
         self::json($response, $code);
     }
+
+    /**
+     * Respuesta paginada estandarizada
+     * @param array $data Datos de la página actual
+     * @param int $page Página actual
+     * @param int $perPage Elementos por página
+     * @param int $total Total de elementos
+     * @param string $message Mensaje opcional
+     */
+    public static function paginated(array $data, int $page, int $perPage, int $total, string $message = 'Operación exitosa')
+    {
+        $totalPages = (int)ceil($total / $perPage);
+        
+        self::json([
+            'success' => true,
+            'message' => $message,
+            'data' => $data,
+            'meta' => [
+                'page' => $page,
+                'per_page' => $perPage,
+                'total' => $total,
+                'total_pages' => $totalPages,
+                'has_next_page' => $page < $totalPages,
+                'has_prev_page' => $page > 1
+            ]
+        ]);
+    }
 }`,
 
     env: `<?php
@@ -1781,6 +1808,200 @@ class JwtDenylistModel extends Model
     }
 }`,
 
+    passwordResetMigration: (dbType) => {
+        if (dbType === 'mysql') {
+            return `-- Tabla para tokens de recuperación de contraseña
+CREATE TABLE IF NOT EXISTS password_resets (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    token_hash VARCHAR(255) NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_password_resets_email (email),
+    INDEX idx_password_resets_token (token_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;`;
+        }
+
+        return `-- Tabla para tokens de recuperación de contraseña
+IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='password_resets' AND xtype='U')
+CREATE TABLE password_resets (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    token_hash VARCHAR(255) NOT NULL,
+    expires_at DATETIME NOT NULL,
+    created_at DATETIME DEFAULT GETDATE()
+);
+
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_password_resets_email')
+CREATE INDEX idx_password_resets_email ON password_resets(email);
+
+IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_password_resets_token')
+CREATE INDEX idx_password_resets_token ON password_resets(token_hash);`;
+    },
+
+    passwordResetModel: `<?php
+namespace App\\Models;
+
+class PasswordResetModel extends Model
+{
+    protected $table = 'password_resets';
+    protected $fillable = ['email', 'token_hash', 'expires_at'];
+
+    public function createToken(string $email, int $validity = 3600): string
+    {
+        // Limpiar tokens antiguos de este email
+        $this->deleteByEmail($email);
+        
+        $token = bin2hex(random_bytes(32));
+        $expires_at = date('Y-m-d H:i:s', time() + $validity);
+
+        $this->create([
+            'email' => $email,
+            'token_hash' => hash('sha256', $token),
+            'expires_at' => $expires_at
+        ]);
+
+        return $token;
+    }
+
+    public function findByToken(string $token)
+    {
+        $hash = hash('sha256', $token);
+        $stmt = $this->db->prepare("SELECT * FROM {$this->getQuotedTable()} WHERE token_hash = ? AND expires_at > NOW()");
+        $stmt->execute([$hash]);
+        return $stmt->fetch();
+    }
+
+    public function deleteByEmail(string $email): bool
+    {
+        $stmt = $this->db->prepare("DELETE FROM {$this->getQuotedTable()} WHERE email = ?");
+        return $stmt->execute([$email]);
+    }
+
+    public function cleanupExpired(): int
+    {
+        $stmt = $this->db->prepare("DELETE FROM {$this->getQuotedTable()} WHERE expires_at < NOW()");
+        $stmt->execute();
+        return $stmt->rowCount();
+    }
+}`,
+
+    dockerCompose: (dbType) => {
+        const mysqlService = `  mysql:
+    image: mysql:8.0
+    container_name: \${APP_NAME:-app}_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: \${DB_PASS:-secret}
+      MYSQL_DATABASE: \${DB_NAME:-mi_base}
+      MYSQL_USER: \${DB_USER:-user}
+      MYSQL_PASSWORD: \${DB_PASS:-secret}
+    ports:
+      - "\${DB_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - app_network`;
+
+        const sqlserverService = `  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: \${APP_NAME:-app}_sqlserver
+    restart: unless-stopped
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: \${DB_PASS:-YourStrong@Passw0rd}
+      MSSQL_PID: Developer
+    ports:
+      - "\${DB_PORT:-1433}:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    networks:
+      - app_network`;
+
+        return `version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: \${APP_NAME:-app}_php
+    restart: unless-stopped
+    working_dir: /var/www/html
+    volumes:
+      - ./:/var/www/html
+      - ./logs:/var/www/html/logs
+    ports:
+      - "\${APP_PORT:-8000}:8000"
+    depends_on:
+      - ${dbType === 'mysql' ? 'mysql' : 'sqlserver'}
+      - redis
+    networks:
+      - app_network
+    command: php -S 0.0.0.0:8000 -t public
+
+${dbType === 'mysql' ? mysqlService : sqlserverService}
+
+  redis:
+    image: redis:7-alpine
+    container_name: \${APP_NAME:-app}_redis
+    restart: unless-stopped
+    ports:
+      - "\${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - app_network
+
+networks:
+  app_network:
+    driver: bridge
+
+volumes:
+  ${dbType === 'mysql' ? 'mysql_data:' : 'sqlserver_data:'}
+  redis_data:
+`;
+    },
+
+    dockerfile: `FROM php:8.2-cli
+
+# Instalar dependencias del sistema
+RUN apt-get update && apt-get install -y \\
+    git \\
+    unzip \\
+    libzip-dev \\
+    && docker-php-ext-install pdo pdo_mysql zip
+
+# Instalar Composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+
+# Configurar directorio de trabajo
+WORKDIR /var/www/html
+
+# Copiar archivos de la aplicación
+COPY . .
+
+# Instalar dependencias de PHP
+RUN composer install --no-dev --optimize-autoloader
+
+# Exponer puerto
+EXPOSE 8000
+
+CMD ["php", "-S", "0.0.0.0:8000", "-t", "public"]
+`,
+
+    dockerignore: `node_modules
+vendor
+.git
+.env
+.env.*
+!.env.example
+logs/*.log
+*.tmp
+.DS_Store
+Thumbs.db
+`,
+
     customMiddleware: (name) => `<?php
 namespace Core;
 
@@ -2856,21 +3077,40 @@ async function runMigrations() {
     if (!exists(migrationsDir)) {
         error('No se encontró el directorio de migraciones. ¿Has creado el proyecto con autenticación JWT?');
     }
+    
     // Verificar archivos de migración
-    const migrationFiles = [
+    const allMigrations = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql'));
+    
+    if (allMigrations.length === 0) {
+        error('No se encontraron archivos de migración (.sql) en database/migrations/');
+    }
+
+    // Ordenar migraciones según dependencias
+    // users debe ir primero, luego las que dependen de users
+    const migrationOrder = [
         'users.sql',
         'jwt_denylist.sql',
-        'refresh_tokens.sql'
+        'refresh_tokens.sql',
+        'password_resets.sql'
     ];
-    const missingMigrations = migrationFiles.filter(file =>
-        !exists(path.join(migrationsDir, file))
-    );
-    if (missingMigrations.length > 0) {
-        error(`Faltan archivos de migración: ${missingMigrations.join(', ')}`);
-    }
+
+    // Separar migraciones conocidas y desconocidas
+    const knownMigrations = migrationOrder.filter(m => allMigrations.includes(m));
+    const unknownMigrations = allMigrations
+        .filter(m => !migrationOrder.includes(m))
+        .sort(); // Ordenar alfabéticamente las desconocidas
+
+    // Combinar: conocidas en orden + desconocidas alfabéticamente
+    const migrationFiles = [...knownMigrations, ...unknownMigrations];
 
     console.log('📦 Ejecutando migraciones de base de datos...');
     console.log(`🔗 Conectando a: ${dbType}://${dbUser}@${dbHost}:${dbPort}/${dbName}`);
+    console.log(`📋 Migraciones a ejecutar (${migrationFiles.length}):`);
+    migrationFiles.forEach((file, index) => {
+        console.log(`   ${index + 1}. ${file}`);
+    });
+    console.log('');
+    
     try {
         // Crear conexión a la base de datos
         let connection;
@@ -2938,7 +3178,7 @@ async function runMigrations() {
             } else {
                 // Para SQL Server, asumimos que la base de datos ya existe
                 // o el usuario tiene permisos para crearla
-                console.log('⚠️  Para SQL Server, asegúrate de que la base de datos exista');
+                console.log('ℹ️  Para SQL Server, asegúrate de que la base de datos exista');
             }
         } catch (e) {
             console.log('ℹ️  Usando base de datos existente...', e.message);
@@ -2995,10 +3235,6 @@ async function runMigrations() {
             connection.close();
         }
         success('\n🎉 ¡Todas las migraciones se ejecutaron correctamente!');
-        console.log('\n📊 Tablas creadas:');
-        console.log('   ✅ users - Tabla de usuarios para autenticación');
-        console.log('   ✅ jwt_denylist - Lista negra de tokens JWT revocados');
-        console.log('   ✅ refresh_tokens - Almacenamiento seguro de refresh tokens');
     } catch (error) {
         console.error('\n❌ Error ejecutando migraciones:');
         console.error(`   Mensaje: ${error.message}`);
@@ -3012,6 +3248,255 @@ async function runMigrations() {
         }
         process.exit(1);
     }
+}
+
+async function dbFresh(options = {}) {
+    if (!inProject()) error('No estás en un proyecto.');
+    
+    // Si se pasa --force, saltar confirmación
+    if (!options.force) {
+        const answers = await inquirer.prompt([
+            {
+                type: 'confirm',
+                name: 'confirm',
+                message: '⚠️  Esto eliminará TODAS las tablas y datos. ¿Continuar?',
+                default: false
+            }
+        ]);
+
+        if (!answers.confirm) {
+            console.log('❌ Operación cancelada');
+            return;
+        }
+    } else {
+        console.log('⚠️  Modo --force: Saltando confirmación');
+    }
+
+    console.log('🗑️  Eliminando base de datos...');
+    
+    const envPath = path.join(process.cwd(), '.env');
+    const envContent = fs.readFileSync(envPath, 'utf8');
+    const envVars = {};
+    envContent.split('\n').forEach(line => {
+        const [key, value] = line.split('=');
+        if (key && value) {
+            envVars[key.trim()] = value.trim();
+        }
+    });
+
+    const dbType = envVars.DB_TYPE || 'mysql';
+    const dbHost = envVars.DB_HOST || 'localhost';
+    const dbPort = envVars.DB_PORT || (dbType === 'mysql' ? '3306' : '1433');
+    const dbName = envVars.DB_NAME || 'mi_base';
+    const dbUser = envVars.DB_USER || (dbType === 'mysql' ? 'root' : 'sa');
+    const dbPass = envVars.DB_PASS || '';
+
+    try {
+        if (dbType === 'mysql') {
+            const mysql = await import('mysql2/promise');
+            const connection = await mysql.createConnection({
+                host: dbHost,
+                port: parseInt(dbPort),
+                user: dbUser,
+                password: dbPass
+            });
+
+            await connection.execute(`DROP DATABASE IF EXISTS \`${dbName}\``);
+            await connection.end();
+            success('✅ Base de datos eliminada');
+        } else {
+            console.log('⚠️  Para SQL Server, elimina la base de datos manualmente');
+        }
+
+        console.log('\n📦 Ejecutando migraciones...');
+        await runMigrations();
+    } catch (error) {
+        console.error('❌ Error:', error.message);
+        process.exit(1);
+    }
+}
+
+async function makeAuthReset() {
+    if (!inProject()) error('No estás en un proyecto.');
+
+    const migrationsDir = path.join(process.cwd(), 'database/migrations');
+    if (!exists(migrationsDir)) {
+        error('Este proyecto no tiene autenticación JWT habilitada');
+    }
+
+    const envPath = path.join(process.cwd(), '.env');
+    const envContent = fs.readFileSync(envPath, 'utf8');
+    const dbType = envContent.includes('DB_TYPE=sqlsrv') ? 'sqlsrv' : 'mysql';
+
+    // Crear migración
+    write(process.cwd(), 'database/migrations/password_resets.sql', t.passwordResetMigration(dbType));
+    success('Creado: database/migrations/password_resets.sql');
+
+    // Crear modelo
+    write(process.cwd(), 'app/Models/PasswordResetModel.php', t.passwordResetModel);
+    success('Creado: app/Models/PasswordResetModel.php');
+
+    // Actualizar AuthController
+    const authControllerPath = path.join(process.cwd(), 'app/Controllers/AuthController.php');
+    if (exists(authControllerPath)) {
+        let authController = fs.readFileSync(authControllerPath, 'utf8');
+        
+        // Agregar use statement
+        if (!authController.includes('use App\\Models\\PasswordResetModel')) {
+            authController = authController.replace(
+                'use App\\Models\\UserModel;',
+                'use App\\Models\\PasswordResetModel;\nuse App\\Models\\UserModel;'
+            );
+        }
+
+        // Agregar propiedad
+        if (!authController.includes('private PasswordResetModel $passwordResetModel')) {
+            authController = authController.replace(
+                'private RefreshTokenModel $refreshTokenModel;',
+                'private RefreshTokenModel $refreshTokenModel;\n    private PasswordResetModel $passwordResetModel;'
+            );
+        }
+
+        // Agregar inicialización en constructor
+        if (!authController.includes('$this->passwordResetModel = new PasswordResetModel()')) {
+            authController = authController.replace(
+                '$this->refreshTokenModel = new RefreshTokenModel();',
+                '$this->refreshTokenModel = new RefreshTokenModel();\n        $this->passwordResetModel = new PasswordResetModel();'
+            );
+        }
+
+        // Agregar métodos si no existen
+        if (!authController.includes('public function forgotPassword()')) {
+            const resetMethods = `
+
+    public function forgotPassword()
+    {
+        try {
+            $body = $this->getBody();
+            $errors = Validator::validate($body, ['email' => 'required|email']);
+            if (!empty($errors)) {
+                Response::error('Errores de validación', 422, $errors);
+            }
+
+            $user = $this->userModel->findByEmail($body['email']);
+            if (!$user) {
+                // Por seguridad, siempre devolver éxito aunque el email no exista
+                Response::success(null, 'Si el email existe, recibirás un enlace de recuperación');
+            }
+
+            $token = $this->passwordResetModel->createToken($body['email']);
+            
+            // TODO: Enviar email con el token
+            // $resetLink = "https://tuapp.com/reset-password?token={$token}";
+            // Email::send($body['email'], 'Password Reset', $resetLink);
+
+            Logger::info('Token de recuperación generado', ['email' => $body['email']]);
+            
+            // En desarrollo, devolver el token para testing
+            $response = ['message' => 'Token de recuperación generado'];
+            if (getenv('APP_ENV') === 'development') {
+                $response['token'] = $token; // Solo en desarrollo
+            }
+
+            Response::success($response);
+        } catch (\\Exception $e) {
+            Logger::error('Error en forgotPassword', ['exception' => $e]);
+            Response::error('Error al procesar solicitud', 500);
+        }
+    }
+
+    public function resetPassword()
+    {
+        try {
+            $body = $this->getBody();
+            $errors = Validator::validate($body, [
+                'token' => 'required',
+                'password' => 'required|min:6'
+            ]);
+            if (!empty($errors)) {
+                Response::error('Errores de validación', 422, $errors);
+            }
+
+            $resetData = $this->passwordResetModel->findByToken($body['token']);
+            if (!$resetData) {
+                Response::error('Token inválido o expirado', 400);
+            }
+
+            $user = $this->userModel->findByEmail($resetData['email']);
+            if (!$user) {
+                Response::error('Usuario no encontrado', 404);
+            }
+
+            // Actualizar contraseña
+            $hashedPassword = password_hash($body['password'], PASSWORD_BCRYPT);
+            $this->userModel->update($user['id'], ['password' => $hashedPassword]);
+
+            // Eliminar token usado
+            $this->passwordResetModel->deleteByEmail($resetData['email']);
+
+            Logger::info('Contraseña restablecida', ['user_id' => $user['id']]);
+
+            Response::success(null, 'Contraseña restablecida correctamente');
+        } catch (\\Exception $e) {
+            Logger::error('Error en resetPassword', ['exception' => $e]);
+            Response::error('Error al restablecer contraseña', 500);
+        }
+    }`;
+
+            authController = authController.replace(/}\s*$/, resetMethods + '\n}');
+        }
+
+        fs.writeFileSync(authControllerPath, authController);
+        success('Actualizado: app/Controllers/AuthController.php');
+    }
+
+    // Actualizar rutas
+    const routesPath = path.join(process.cwd(), 'app/Routes/web.php');
+    if (exists(routesPath)) {
+        let routes = fs.readFileSync(routesPath, 'utf8');
+        
+        if (!routes.includes('/auth/forgot-password')) {
+            const resetRoutes = `$router->post('/auth/forgot-password', 'AuthController', 'forgotPassword');
+                                $router->post('/auth/reset-password', 'AuthController', 'resetPassword');`;
+            routes = routes.replace(
+                "$router->post('/auth/login', 'AuthController', 'login');",
+                "$router->post('/auth/login', 'AuthController', 'login');\n" + resetRoutes
+            );
+            fs.writeFileSync(routesPath, routes);
+            success('Actualizado: app/Routes/web.php');
+        }
+    }
+
+    console.log('\n📝 Próximos pasos:');
+    console.log('   1. Ejecuta: php-init db:migrate');
+    console.log('   2. Implementa el envío de emails en AuthController::forgotPassword()');
+    console.log('\n📬 Endpoints creados:');
+    console.log('   POST /auth/forgot-password - Solicitar recuperación');
+    console.log('   POST /auth/reset-password - Restablecer contraseña\n');
+}
+
+async function initDocker() {
+    if (!inProject()) error('No estás en un proyecto.');
+
+    const envPath = path.join(process.cwd(), '.env');
+    const envContent = fs.readFileSync(envPath, 'utf8');
+    const dbType = envContent.includes('DB_TYPE=sqlsrv') ? 'sqlsrv' : 'mysql';
+
+    write(process.cwd(), 'docker-compose.yml', t.dockerCompose(dbType));
+    success('Creado: docker-compose.yml');
+
+    write(process.cwd(), 'Dockerfile', t.dockerfile);
+    success('Creado: Dockerfile');
+
+    write(process.cwd(), '.dockerignore', t.dockerignore);
+    success('Creado: .dockerignore');
+
+    console.log('\n🐳 Docker configurado exitosamente!');
+    console.log('\n📝 Próximos pasos:');
+    console.log('   1. docker-compose up -d');
+    console.log('   2. docker-compose exec app composer install');
+    console.log('   3. docker-compose exec app php-init db:migrate');
+    console.log('\n🌐 La aplicación estará en: http://localhost:8000\n');
 }
 
 // ==============================
@@ -3068,5 +3553,18 @@ program
 program.command('db:migrate')
     .description('Ejecuta las migraciones de la base de datos')
     .action(runMigrations);
+
+program.command('db:fresh')
+    .description('Elimina la base de datos y ejecuta todas las migraciones')
+    .option('-f, --force', 'Forzar sin confirmación (usar con precaución)')
+    .action(dbFresh);
+
+program.command('make:auth-reset')
+    .description('Genera sistema de recuperación de contraseña')
+    .action(makeAuthReset);
+
+program.command('init:docker')
+    .description('Genera archivos Docker (Dockerfile, docker-compose.yml)')
+    .action(initDocker);
 
 program.parse(process.argv);
