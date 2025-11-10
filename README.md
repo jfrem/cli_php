@@ -834,7 +834,7 @@ Este proyecto está bajo la licencia MIT. Ver el archivo `LICENSE` para más det
 
 ## 👨‍💻 Autor
 
-**Jesus F. Remiro**
+**Jhon Fredy Murillo**
 - GitHub: [@jfrem](https://github.com/jfrem)
 
 ---
