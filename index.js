@@ -24,6 +24,7 @@ Ejemplos de uso:
   $ php-init make:model Post posts
   $ php-init db:migrate
   $ php-init server
+  $ php-init auth:cleanup-tokens
   
 Flujo típico:
   1. php-init new mi-api --database mysql --jwt
@@ -1869,8 +1870,11 @@ class PasswordResetModel extends Model
 {
     protected $table = 'password_resets';
     protected $fillable = ['email', 'token_hash', 'expires_at'];
+    
+    // Tiempo de expiración por defecto: 15 minutos (900 segundos)
+    const DEFAULT_EXPIRY = 900;
 
-    public function createToken(string $email, int $validity = 3600): string
+    public function createToken(string $email, int $validity = self::DEFAULT_EXPIRY): string
     {
         // Limpiar tokens antiguos de este email
         $this->deleteByEmail($email);
@@ -3428,18 +3432,21 @@ async function makeAuthReset() {
                 Response::success(null, 'Si el email existe, recibirás un enlace de recuperación');
             }
 
+            // Crear token con expiración de 15 minutos (configurable vía parámetro)
+            // Para cambiar el tiempo: $token = $this->passwordResetModel->createToken($body['email'], 1800); // 30 min
             $token = $this->passwordResetModel->createToken($body['email']);
             
             // TODO: Enviar email con el token
             // $resetLink = "https://tuapp.com/reset-password?token={$token}";
             // Email::send($body['email'], 'Password Reset', $resetLink);
 
-            Logger::info('Token de recuperación generado', ['email' => $body['email']]);
+            Logger::info('Token de recuperación generado (expira en 15 min)', ['email' => $body['email']]);
             
             // En desarrollo, devolver el token para testing
-            $response = ['message' => 'Token de recuperación generado'];
+            $response = ['message' => 'Token de recuperación generado (válido por 15 minutos)'];
             if (getenv('APP_ENV') === 'development') {
                 $response['token'] = $token; // Solo en desarrollo
+                $response['expires_in'] = '15 minutos';
             }
 
             Response::success($response);
@@ -3516,7 +3523,12 @@ async function makeAuthReset() {
     console.log('   2. Implementa el envío de emails en AuthController::forgotPassword()');
     console.log('\n📬 Endpoints creados:');
     console.log('   POST /auth/forgot-password - Solicitar recuperación');
-    console.log('   POST /auth/reset-password - Restablecer contraseña\n');
+    console.log('   POST /auth/reset-password - Restablecer contraseña');
+    console.log('\n⏱️  Seguridad:');
+    console.log('   • Los tokens expiran automáticamente en 15 minutos');
+    console.log('   • Los tokens son de un solo uso (se eliminan al usarse)');
+    console.log('   • Los tokens antiguos se limpian al generar uno nuevo');
+    console.log('   • Para cambiar el tiempo de expiración, edita PasswordResetModel::DEFAULT_EXPIRY\n');
     } catch (err) {
         if (err instanceof CLIError) throw err;
         error(`Error al generar sistema de recuperación: ${err.message}`);
@@ -3549,6 +3561,60 @@ async function initDocker() {
     } catch (err) {
         if (err instanceof CLIError) throw err;
         error(`Error al configurar Docker: ${err.message}`);
+    }
+}
+
+async function cleanupExpiredTokens() {
+    try {
+        if (!inProject()) error('No estás en un proyecto.');
+
+        const passwordResetModelPath = path.join(process.cwd(), 'app/Models/PasswordResetModel.php');
+        if (!exists(passwordResetModelPath)) {
+            error('Este proyecto no tiene el modelo PasswordResetModel. Ejecuta: php-init make:auth-reset');
+        }
+
+        console.log('🧹 Limpiando tokens expirados...\n');
+
+        // Crear script temporal de limpieza
+        const cleanupScript = `<?php
+require_once __DIR__ . '/vendor/autoload.php';
+
+use Core\\Env;
+use App\\Models\\PasswordResetModel;
+
+Env::load(__DIR__ . '/.env');
+
+$model = new PasswordResetModel();
+$deleted = $model->cleanupExpired();
+
+echo "✅ Tokens expirados eliminados: {$deleted}\\n";
+`;
+
+        const tempScript = path.join(process.cwd(), 'cleanup_tokens_temp.php');
+        fs.writeFileSync(tempScript, cleanupScript);
+
+        const cleanup = spawn('php', [tempScript], {
+            stdio: 'inherit',
+            shell: false
+        });
+
+        cleanup.on('close', (code) => {
+            fs.unlinkSync(tempScript);
+            if (code === 0) {
+                console.log('\n✅ Limpieza completada\n');
+            } else {
+                console.error('\n❌ Error durante la limpieza\n');
+                process.exit(1);
+            }
+        });
+
+        cleanup.on('error', (err) => {
+            fs.unlinkSync(tempScript);
+            error(`Error al ejecutar limpieza: ${err.message}`);
+        });
+    } catch (err) {
+        if (err instanceof CLIError) throw err;
+        error(`Error al limpiar tokens: ${err.message}`);
     }
 }
 
@@ -3640,6 +3706,17 @@ program.command('make:auth-reset')
 program.command('init:docker')
     .description('Genera archivos Docker (Dockerfile, docker-compose.yml)')
     .action(initDocker);
+
+program.command('auth:cleanup-tokens')
+    .description('Limpia tokens de recuperación de contraseña expirados')
+    .addHelpText('after', `
+Ejemplo:
+  $ php-init auth:cleanup-tokens
+  
+Este comando elimina todos los tokens de password_resets que han expirado.
+Útil para ejecutar en un cron job periódico.
+`)
+    .action(cleanupExpiredTokens);
 
 // Manejador global de errores
 process.on('uncaughtException', (err) => {
