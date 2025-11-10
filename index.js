@@ -61,9 +61,15 @@ const inProject = () => ['composer.json', 'app', 'core'].some(m =>
     exists(path.join(process.cwd(), m))
 );
 
+class CLIError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'CLIError';
+    }
+}
+
 const error = (msg) => {
-    console.error(`❌ ${msg}`);
-    process.exit(1);
+    throw new CLIError(msg);
 };
 
 const success = (msg) => console.log(`✅ ${msg}`);
@@ -2949,103 +2955,113 @@ async function makeTest(name) {
 }
 
 function listRoutes() {
-    if (!inProject()) error('No estás en un proyecto.');
+    try {
+        if (!inProject()) error('No estás en un proyecto.');
 
-    const file = path.join(process.cwd(), 'app/Routes/web.php');
-    if (!exists(file)) error('No se encontró web.php');
+        const file = path.join(process.cwd(), 'app/Routes/web.php');
+        if (!exists(file)) error('No se encontró web.php');
 
-    const content = fs.readFileSync(file, 'utf8');
-    const regex = /\$router->(get|post|put|delete)\s*\(\s*(['"])([^'"]+)\2\s*,\s*(['"])([^'"]+)\4\s*,\s*(['"])([^'"]+)\6\s*\)(?:->middleware\s*\(\s*(.*?)\s*\))?/g;
+        const content = fs.readFileSync(file, 'utf8');
+        const regex = /\$router->(get|post|put|delete)\s*\(\s*(['"])([^'"]+)\2\s*,\s*(['"])([^'"]+)\4\s*,\s*(['"])([^'"]+)\6\s*\)(?:->middleware\s*\(\s*(.*?)\s*\))?/g;
 
-    console.log('\n📋 Rutas registradas:');
-    console.log('-'.repeat(90));
-    console.log('Método  | URI                  | Controlador          | Acción           | Middlewares');
-    console.log('-'.repeat(90));
+        console.log('\n📋 Rutas registradas:');
+        console.log('-'.repeat(90));
+        console.log('Método  | URI                  | Controlador          | Acción           | Middlewares');
+        console.log('-'.repeat(90));
 
-    let match;
-    while ((match = regex.exec(content)) !== null) {
-        const [, method, uri, controller, action, middlewares] = match;
-        const mw = middlewares ? middlewares.replace(/['"]/g, '').split(',').map(m => m.trim()).join(', ') : '-';
-        console.log(`${method.toUpperCase().padEnd(7)} | ${uri.padEnd(20)} | ${controller.padEnd(20)} | ${action.padEnd(16)} | ${mw}`);
+        let match;
+        while ((match = regex.exec(content)) !== null) {
+            const [, method, uri, controller, action, middlewares] = match;
+            const mw = middlewares ? middlewares.replace(/['"]/g, '').split(',').map(m => m.trim()).join(', ') : '-';
+            console.log(`${method.toUpperCase().padEnd(7)} | ${uri.padEnd(20)} | ${controller.padEnd(20)} | ${action.padEnd(16)} | ${mw}`);
+        }
+        console.log('-'.repeat(90) + '\n');
+    } catch (err) {
+        if (err instanceof CLIError) throw err;
+        error(`Error al listar rutas: ${err.message}`);
     }
-    console.log('-'.repeat(90) + '\n');
 }
 
 async function startServer() {
-    if (!inProject()) error('No estás en un proyecto.');
+    try {
+        if (!inProject()) error('No estás en un proyecto.');
 
-    const publicDir = path.join(process.cwd(), 'public');
-    if (!exists(publicDir)) error('Directorio public/ no encontrado.');
+        const publicDir = path.join(process.cwd(), 'public');
+        if (!exists(publicDir)) error('Directorio public/ no encontrado.');
 
-    const answers = await inquirer.prompt([
-        {
-            type: 'input',
-            name: 'host',
-            message: 'Host:',
-            default: 'localhost',
-            validate: (input) => {
-                if (!input) return 'El host no puede estar vacío.';
-                if (!/^[a-zA-Z0-9.-]+$/.test(input)) {
-                    return 'Host inválido. Solo se permiten caracteres alfanuméricos, puntos y guiones.';
+        const answers = await inquirer.prompt([
+            {
+                type: 'input',
+                name: 'host',
+                message: 'Host:',
+                default: 'localhost',
+                validate: (input) => {
+                    if (!input) return 'El host no puede estar vacío.';
+                    if (!/^[a-zA-Z0-9.-]+$/.test(input)) {
+                        return 'Host inválido. Solo se permiten caracteres alfanuméricos, puntos y guiones.';
+                    }
+                    if (input.length > 253) return 'Host demasiado largo.';
+                    return true;
                 }
-                if (input.length > 253) return 'Host demasiado largo.';
-                return true;
-            }
-        },
-        {
-            type: 'input',
-            name: 'port',
-            message: 'Puerto:',
-            default: '8000',
-            validate: (input) => {
-                const port = parseInt(input);
-                if (isNaN(port) || port < 1 || port > 65535) {
-                    return 'Puerto inválido (1-65535)';
+            },
+            {
+                type: 'input',
+                name: 'port',
+                message: 'Puerto:',
+                default: '8000',
+                validate: (input) => {
+                    const port = parseInt(input);
+                    if (isNaN(port) || port < 1 || port > 65535) {
+                        return 'Puerto inválido (1-65535)';
+                    }
+                    return true;
                 }
-                return true;
             }
-        }
-    ]);
+        ]);
 
-    const { host, port } = answers;
+        const { host, port } = answers;
 
-    console.log('\n🚀 Iniciando servidor de desarrollo...');
-    console.log(`📡 Servidor corriendo en: http://${host}:${port}`);
-    console.log('⏹️  Presiona Ctrl+C para detener\n');
-    const server = spawn('php', [
-        '-S',
-        `${host}:${port}`,
-        '-t',
-        'public'
-    ], {
-        stdio: 'inherit',
-        shell: false,
-        windowsHide: true
-    });
+        console.log('\n🚀 Iniciando servidor de desarrollo...');
+        console.log(`📡 Servidor corriendo en: http://${host}:${port}`);
+        console.log('⏹️  Presiona Ctrl+C para detener\n');
+        const server = spawn('php', [
+            '-S',
+            `${host}:${port}`,
+            '-t',
+            'public'
+        ], {
+            stdio: 'inherit',
+            shell: false,
+            windowsHide: true
+        });
 
-    server.on('error', (err) => {
-        if (err.code === 'EACCES') {
-            error(`Puerto ${port} requiere privilegios de administrador`);
-        } else if (err.code === 'EADDRINUSE') {
-            error(`Puerto ${port} ya está en uso`);
-        } else {
-            error(`Error del servidor: ${err.message}`);
-        }
-    });
+        server.on('error', (err) => {
+            if (err.code === 'EACCES') {
+                error(`Puerto ${port} requiere privilegios de administrador`);
+            } else if (err.code === 'EADDRINUSE') {
+                error(`Puerto ${port} ya está en uso`);
+            } else {
+                error(`Error del servidor: ${err.message}`);
+            }
+        });
 
-    server.on('close', (code) => {
-        if (code !== 0 && code !== null) {
-            console.log(`\n⚠️  Servidor detenido con código: ${code}`);
-        } else {
-            console.log('\n👋 Servidor detenido');
-        }
-    });
+        server.on('close', (code) => {
+            if (code !== 0 && code !== null) {
+                console.log(`\n⚠️  Servidor detenido con código: ${code}`);
+            } else {
+                console.log('\n👋 Servidor detenido');
+            }
+        });
 
-    process.on('SIGINT', () => {
-        console.log('\n\n⏹️  Deteniendo servidor...');
-        server.kill('SIGINT');
-        process.exit(0);
-    });
+        process.on('SIGINT', () => {
+            console.log('\n\n⏹️  Deteniendo servidor...');
+            server.kill('SIGINT');
+            process.exit(0);
+        });
+    } catch (err) {
+        if (err instanceof CLIError) throw err;
+        error(`Error al iniciar servidor: ${err.message}`);
+    }
 }
 
 async function runMigrations() {
@@ -3344,16 +3360,17 @@ async function dbFresh(options = {}) {
 }
 
 async function makeAuthReset() {
-    if (!inProject()) error('No estás en un proyecto.');
+    try {
+        if (!inProject()) error('No estás en un proyecto.');
 
-    const migrationsDir = path.join(process.cwd(), 'database/migrations');
-    if (!exists(migrationsDir)) {
-        error('Este proyecto no tiene autenticación JWT habilitada');
-    }
+        const migrationsDir = path.join(process.cwd(), 'database/migrations');
+        if (!exists(migrationsDir)) {
+            error('Este proyecto no tiene autenticación JWT habilitada');
+        }
 
-    const envPath = path.join(process.cwd(), '.env');
-    const envContent = fs.readFileSync(envPath, 'utf8');
-    const dbType = envContent.includes('DB_TYPE=sqlsrv') ? 'sqlsrv' : 'mysql';
+        const envPath = path.join(process.cwd(), '.env');
+        const envContent = fs.readFileSync(envPath, 'utf8');
+        const dbType = envContent.includes('DB_TYPE=sqlsrv') ? 'sqlsrv' : 'mysql';
 
     // Crear migración
     write(process.cwd(), 'database/migrations/password_resets.sql', t.passwordResetMigration(dbType));
@@ -3500,30 +3517,39 @@ async function makeAuthReset() {
     console.log('\n📬 Endpoints creados:');
     console.log('   POST /auth/forgot-password - Solicitar recuperación');
     console.log('   POST /auth/reset-password - Restablecer contraseña\n');
+    } catch (err) {
+        if (err instanceof CLIError) throw err;
+        error(`Error al generar sistema de recuperación: ${err.message}`);
+    }
 }
 
 async function initDocker() {
-    if (!inProject()) error('No estás en un proyecto.');
+    try {
+        if (!inProject()) error('No estás en un proyecto.');
 
-    const envPath = path.join(process.cwd(), '.env');
-    const envContent = fs.readFileSync(envPath, 'utf8');
-    const dbType = envContent.includes('DB_TYPE=sqlsrv') ? 'sqlsrv' : 'mysql';
+        const envPath = path.join(process.cwd(), '.env');
+        const envContent = fs.readFileSync(envPath, 'utf8');
+        const dbType = envContent.includes('DB_TYPE=sqlsrv') ? 'sqlsrv' : 'mysql';
 
-    write(process.cwd(), 'docker-compose.yml', t.dockerCompose(dbType));
-    success('Creado: docker-compose.yml');
+        write(process.cwd(), 'docker-compose.yml', t.dockerCompose(dbType));
+        success('Creado: docker-compose.yml');
 
-    write(process.cwd(), 'Dockerfile', t.dockerfile);
-    success('Creado: Dockerfile');
+        write(process.cwd(), 'Dockerfile', t.dockerfile);
+        success('Creado: Dockerfile');
 
-    write(process.cwd(), '.dockerignore', t.dockerignore);
-    success('Creado: .dockerignore');
+        write(process.cwd(), '.dockerignore', t.dockerignore);
+        success('Creado: .dockerignore');
 
-    console.log('\n🐳 Docker configurado exitosamente!');
-    console.log('\n📝 Próximos pasos:');
-    console.log('   1. docker-compose up -d');
-    console.log('   2. docker-compose exec app composer install');
-    console.log('   3. docker-compose exec app php-init db:migrate');
-    console.log('\n🌐 La aplicación estará en: http://localhost:8000\n');
+        console.log('\n🐳 Docker configurado exitosamente!');
+        console.log('\n📝 Próximos pasos:');
+        console.log('   1. docker-compose up -d');
+        console.log('   2. docker-compose exec app composer install');
+        console.log('   3. docker-compose exec app php-init db:migrate');
+        console.log('\n🌐 La aplicación estará en: http://localhost:8000\n');
+    } catch (err) {
+        if (err instanceof CLIError) throw err;
+        error(`Error al configurar Docker: ${err.message}`);
+    }
 }
 
 // ==============================
@@ -3614,5 +3640,29 @@ program.command('make:auth-reset')
 program.command('init:docker')
     .description('Genera archivos Docker (Dockerfile, docker-compose.yml)')
     .action(initDocker);
+
+// Manejador global de errores
+process.on('uncaughtException', (err) => {
+    if (err instanceof CLIError) {
+        console.error(`❌ ${err.message}`);
+        process.exit(1);
+    } else {
+        console.error('❌ Error inesperado:', err.message);
+        if (process.env.DEBUG) {
+            console.error(err.stack);
+        }
+        process.exit(1);
+    }
+});
+
+process.on('unhandledRejection', (reason) => {
+    if (reason instanceof CLIError) {
+        console.error(`❌ ${reason.message}`);
+        process.exit(1);
+    } else {
+        console.error('❌ Error inesperado:', reason);
+        process.exit(1);
+    }
+});
 
 program.parse(process.argv);
