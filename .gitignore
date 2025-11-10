@@ -5,6 +5,5 @@
 /dist/  
 .DS_Store  
 Thumbs.db  
-/node_modules/  
-
-mi-api/
+/node_modules/
+AGENTS.md
