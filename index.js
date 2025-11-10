@@ -2082,11 +2082,11 @@ class ${name} extends Controller
             Response::success($this->model->all(), 'Registros obtenidos');
         } catch (\\PDOException $e) {
             $errorId = uniqid('err_');
-            Logger::error("Error de BD en {$name}::index [ID: {$errorId}]", ['exception' => $e]);
+            Logger::error("Error de BD en ${name}::index [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
         } catch (\\Exception $e) {
             $errorId = uniqid('err_');
-            Logger::error("Error en {$name}::index [ID: {$errorId}]", ['exception' => $e]);
+            Logger::error("Error en ${name}::index [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error inesperado. ID de error: {$errorId}", 500);
         }
     }
@@ -2099,11 +2099,11 @@ class ${name} extends Controller
             Response::success($data, 'Registro encontrado');
         } catch (\\PDOException $e) {
             $errorId = uniqid('err_');
-            Logger::error("Error de BD en {$name}::show [ID: {$errorId}]", ['exception' => $e]);
+            Logger::error("Error de BD en ${name}::show [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
         } catch (\\Exception $e) {
             $errorId = uniqid('err_');
-            Logger::error("Error en {$name}::show [ID: {$errorId}]", ['exception' => $e]);
+            Logger::error("Error en ${name}::show [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error inesperado. ID de error: {$errorId}", 500);
         }
     }
@@ -2117,11 +2117,11 @@ class ${name} extends Controller
             Response::success($newItem, 'Registro creado', 201);
         } catch (\\PDOException $e) {
             $errorId = uniqid('err_');
-            Logger::error("Error de BD en {$name}::store [ID: {$errorId}]", ['exception' => $e]);
+            Logger::error("Error de BD en ${name}::store [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
         } catch (\\Exception $e) {
             $errorId = uniqid('err_');
-            Logger::error("Error en {$name}::store [ID: {$errorId}]", ['exception' => $e]);
+            Logger::error("Error en ${name}::store [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error inesperado. ID de error: {$errorId}", 500);
         }
     }
@@ -2136,11 +2136,11 @@ class ${name} extends Controller
             Response::success($updatedItem, 'Registro actualizado');
         } catch (\\PDOException $e) {
             $errorId = uniqid('err_');
-            Logger::error("Error de BD en {$name}::update [ID: {$errorId}]", ['exception' => $e]);
+            Logger::error("Error de BD en ${name}::update [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
         } catch (\\Exception $e) {
             $errorId = uniqid('err_');
-            Logger::error("Error en {$name}::update [ID: {$errorId}]", ['exception' => $e]);
+            Logger::error("Error en ${name}::update [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error inesperado. ID de error: {$errorId}", 500);
         }
     }
@@ -2153,11 +2153,11 @@ class ${name} extends Controller
             Response::success(null, 'Registro eliminado');
         } catch (\\PDOException $e) {
             $errorId = uniqid('err_');
-            Logger::error("Error de BD en {$name}::destroy [ID: {$errorId}]", ['exception' => $e]);
+            Logger::error("Error de BD en ${name}::destroy [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error de base de datos. ID de error: {$errorId}", 500);
         } catch (\\Exception $e) {
             $errorId = uniqid('err_');
-            Logger::error("Error en {$name}::destroy [ID: {$errorId}]", ['exception' => $e]);
+            Logger::error("Error en ${name}::destroy [ID: {$errorId}]", ['exception' => $e]);
             Response::error("Error inesperado. ID de error: {$errorId}", 500);
         }
     }
@@ -2739,7 +2739,8 @@ async function makeController(name) {
         write(process.cwd(), `app/Controllers/${className}.php`, t.crudController(className, model));
         success(`Creado: app/Controllers/${className}.php`);
     } catch (err) {
-        error(`Error de seguridad: ${err.message}`);
+        if (err instanceof CLIError) throw err;
+        error(`Error al crear controlador: ${err.message}`);
     }
 }
 
@@ -2819,7 +2820,8 @@ async function makeModel(name, tableName) {
             console.log(`   protected $fillable = ['columna1', 'columna2'];`);
         }
     } catch (err) {
-        error(`Error de seguridad: ${err.message}`);
+        if (err instanceof CLIError) throw err;
+        error(`Error al crear modelo: ${err.message}`);
     }
 }
 
@@ -2843,7 +2845,8 @@ async function makeMiddleware(name) {
         console.log(`   3. Usa el middleware en tus rutas:`);
         console.log(`      $router->get('/ruta', 'Controller', 'method')->middleware('${name.toLowerCase()}');\n`);
     } catch (err) {
-        error(`Error de seguridad: ${err.message}`);
+        if (err instanceof CLIError) throw err;
+        error(`Error al crear middleware: ${err.message}`);
     }
 }
 
@@ -2937,7 +2940,8 @@ $router->delete('${route}/{id}', '${controller}', 'destroy');
             console.log(`   protected $fillable = ['columna1', 'columna2'];`);
         }
     } catch (err) {
-        error(`Error de seguridad: ${err.message}`);
+        if (err instanceof CLIError) throw err;
+        error(`Error al crear CRUD: ${err.message}`);
     }
 }
 
@@ -2954,7 +2958,8 @@ async function makeTest(name) {
         write(process.cwd(), `tests/${className}.php`, t.testTemplate(name));
         success(`Creado: tests/${className}.php`);
     } catch (err) {
-        error(`Error de seguridad: ${err.message}`);
+        if (err instanceof CLIError) throw err;
+        error(`Error al crear test: ${err.message}`);
     }
 }
 
@@ -3158,9 +3163,9 @@ async function runMigrations() {
     });
     console.log('');
     
+    let connection = null;
     try {
         // Crear conexión a la base de datos
-        let connection;
         if (dbType === 'mysql') {
             const mysql = await import('mysql2/promise');
             // 1. Connect to MySQL server without specifying a database
@@ -3276,11 +3281,6 @@ async function runMigrations() {
                 }
             }
         }
-        if (dbType === 'mysql') {
-            await connection.end();
-        } else {
-            connection.close();
-        }
         success('\n🎉 ¡Todas las migraciones se ejecutaron correctamente!');
     } catch (error) {
         console.error('\n❌ Error ejecutando migraciones:');
@@ -3294,6 +3294,19 @@ async function runMigrations() {
             console.error('   4. Para MySQL: GRANT ALL PRIVILEGES ON *.* TO usuario@localhost');
         }
         process.exit(1);
+    } finally {
+        // Asegurar cierre de conexión
+        if (connection) {
+            try {
+                if (dbType === 'mysql') {
+                    await connection.end();
+                } else {
+                    connection.close();
+                }
+            } catch (closeError) {
+                console.error('⚠️  Error al cerrar conexión:', closeError.message);
+            }
+        }
     }
 }
 
@@ -3338,10 +3351,11 @@ async function dbFresh(options = {}) {
     const dbUser = envVars.DB_USER || (dbType === 'mysql' ? 'root' : 'sa');
     const dbPass = envVars.DB_PASS || '';
 
+    let connection = null;
     try {
         if (dbType === 'mysql') {
             const mysql = await import('mysql2/promise');
-            const connection = await mysql.createConnection({
+            connection = await mysql.createConnection({
                 host: dbHost,
                 port: parseInt(dbPort),
                 user: dbUser,
@@ -3349,7 +3363,6 @@ async function dbFresh(options = {}) {
             });
 
             await connection.execute(`DROP DATABASE IF EXISTS \`${dbName}\``);
-            await connection.end();
             success('✅ Base de datos eliminada');
         } else {
             console.log('⚠️  Para SQL Server, elimina la base de datos manualmente');
@@ -3360,6 +3373,14 @@ async function dbFresh(options = {}) {
     } catch (error) {
         console.error('❌ Error:', error.message);
         process.exit(1);
+    } finally {
+        if (connection && dbType === 'mysql') {
+            try {
+                await connection.end();
+            } catch (closeError) {
+                console.error('⚠️  Error al cerrar conexión:', closeError.message);
+            }
+        }
     }
 }
 
@@ -3565,6 +3586,7 @@ async function initDocker() {
 }
 
 async function cleanupExpiredTokens() {
+    let tempScript = null;
     try {
         if (!inProject()) error('No estás en un proyecto.');
 
@@ -3590,7 +3612,7 @@ $deleted = $model->cleanupExpired();
 echo "✅ Tokens expirados eliminados: {$deleted}\\n";
 `;
 
-        const tempScript = path.join(process.cwd(), 'cleanup_tokens_temp.php');
+        tempScript = path.join(process.cwd(), 'cleanup_tokens_temp.php');
         fs.writeFileSync(tempScript, cleanupScript);
 
         const cleanup = spawn('php', [tempScript], {
@@ -3599,7 +3621,13 @@ echo "✅ Tokens expirados eliminados: {$deleted}\\n";
         });
 
         cleanup.on('close', (code) => {
-            fs.unlinkSync(tempScript);
+            if (tempScript && exists(tempScript)) {
+                try {
+                    fs.unlinkSync(tempScript);
+                } catch (unlinkErr) {
+                    console.error(`⚠️  No se pudo eliminar archivo temporal: ${unlinkErr.message}`);
+                }
+            }
             if (code === 0) {
                 console.log('\n✅ Limpieza completada\n');
             } else {
@@ -3609,10 +3637,24 @@ echo "✅ Tokens expirados eliminados: {$deleted}\\n";
         });
 
         cleanup.on('error', (err) => {
-            fs.unlinkSync(tempScript);
+            if (tempScript && exists(tempScript)) {
+                try {
+                    fs.unlinkSync(tempScript);
+                } catch (unlinkErr) {
+                    console.error(`⚠️  No se pudo eliminar archivo temporal: ${unlinkErr.message}`);
+                }
+            }
             error(`Error al ejecutar limpieza: ${err.message}`);
         });
     } catch (err) {
+        // Limpieza en caso de error
+        if (tempScript && exists(tempScript)) {
+            try {
+                fs.unlinkSync(tempScript);
+            } catch (unlinkErr) {
+                console.error(`⚠️  No se pudo eliminar archivo temporal: ${unlinkErr.message}`);
+            }
+        }
         if (err instanceof CLIError) throw err;
         error(`Error al limpiar tokens: ${err.message}`);
     }
