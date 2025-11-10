@@ -93,6 +93,12 @@ const sanitizeClassName = (input, entityType = 'class') => {
         throw new Error(`Nombre demasiado largo: "${input}"`);
     }
 
+    // Validación contra nombres reservados
+    const banned = ['__proto__', 'prototype', 'constructor'];
+    if (banned.includes(input.toLowerCase())) {
+        throw new Error(`Nombre reservado no permitido: "${input}"`);
+    }
+
     return input;
 };
 
@@ -105,18 +111,12 @@ const sanitizeTableName = (input) => {
         throw new Error(`Nombre de tabla inválido: "${input}". Solo a-z, A-Z, 0-9, _, empezando con letra o _.`);
     }
 
-    return input;
-};
-
-// Validación adicional contra nombres peligrosos de objetos
-const ensureSafeName = (input, entityType = 'nombre') => {
-    if (typeof input !== 'string') {
-        throw new Error(`Nombre de ${entityType} debe ser texto`);
-    }
+    // Validación contra nombres reservados
     const banned = ['__proto__', 'prototype', 'constructor'];
     if (banned.includes(input.toLowerCase())) {
         throw new Error(`Nombre reservado no permitido: "${input}"`);
     }
+
     return input;
 };
 
@@ -2567,7 +2567,7 @@ Para más información o reportar issues, visita el repositorio del proyecto.
 
 async function newProject(name, options) {
     try {
-        name = ensureSafeName(sanitizeClassName(name, 'proyecto'), 'proyecto');
+        name = sanitizeClassName(name, 'proyecto');
     } catch (err) {
         error(`Nombre de proyecto inválido: ${err.message}`);
     }
@@ -2729,7 +2729,7 @@ async function makeController(name) {
     if (!inProject()) error('No estás en un proyecto.');
 
     try {
-        name = ensureSafeName(sanitizeClassName(name, 'controlador'), 'controlador');
+        name = sanitizeClassName(name, 'controlador');
         const className = cap(name) + 'Controller';
         const file = path.join(process.cwd(), 'app/Controllers', `${className}.php`);
 
@@ -2748,7 +2748,7 @@ async function makeModel(name, tableName) {
     if (!inProject()) error('No estás en un proyecto.');
 
     try {
-        name = ensureSafeName(sanitizeClassName(name, 'modelo'), 'modelo');
+        name = sanitizeClassName(name, 'modelo');
 
         let finalTableName = tableName;
         if (!finalTableName) {
@@ -2760,7 +2760,7 @@ async function makeModel(name, tableName) {
                     default: name.toLowerCase() + 's',
                     validate: (input) => {
                         try {
-                            ensureSafeName(sanitizeTableName(input), 'tabla');
+                            sanitizeTableName(input);
                             return true;
                         } catch (err) {
                             return err.message;
@@ -2770,7 +2770,7 @@ async function makeModel(name, tableName) {
             ]);
             finalTableName = answers.tableNamePrompt;
         } else {
-            finalTableName = ensureSafeName(sanitizeTableName(finalTableName), 'tabla');
+            finalTableName = sanitizeTableName(finalTableName);
         }
 
         // Preguntar por columnas fillable
@@ -2829,7 +2829,7 @@ async function makeMiddleware(name) {
     if (!inProject()) error('No estás en un proyecto.');
 
     try {
-        name = ensureSafeName(sanitizeClassName(name, 'middleware'), 'middleware');
+        name = sanitizeClassName(name, 'middleware');
         const className = cap(name) + 'Middleware';
         const file = path.join(process.cwd(), 'core', `${className}.php`);
 
@@ -2854,7 +2854,7 @@ async function makeCrud(name) {
     if (!inProject()) error('No estás en un proyecto.');
 
     try {
-        name = ensureSafeName(sanitizeClassName(name, 'CRUD'), 'CRUD');
+        name = sanitizeClassName(name, 'CRUD');
 
         const answers = await inquirer.prompt([
             {
@@ -2864,7 +2864,7 @@ async function makeCrud(name) {
                 default: name.toLowerCase() + 's',
                 validate: (input) => {
                     try {
-                        ensureSafeName(sanitizeTableName(input), 'tabla');
+                        sanitizeTableName(input);
                         return true;
                     } catch (err) {
                         return err.message;
@@ -2949,7 +2949,7 @@ async function makeTest(name) {
     if (!inProject()) error('No estás en un proyecto.');
 
     try {
-        name = ensureSafeName(sanitizeClassName(name, 'test'), 'test');
+        name = sanitizeClassName(name, 'test');
         const className = cap(name) + 'Test';
         const file = path.join(process.cwd(), 'tests', `${className}.php`);
 
@@ -3129,10 +3129,10 @@ async function runMigrations() {
     if (!exists(migrationsDir)) {
         error('No se encontró el directorio de migraciones. ¿Has creado el proyecto con autenticación JWT?');
     }
-    
+
     // Verificar archivos de migración
     const allMigrations = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql'));
-    
+
     if (allMigrations.length === 0) {
         error('No se encontraron archivos de migración (.sql) en database/migrations/');
     }
@@ -3162,7 +3162,7 @@ async function runMigrations() {
         console.log(`   ${index + 1}. ${file}`);
     });
     console.log('');
-    
+
     let connection = null;
     try {
         // Crear conexión a la base de datos
@@ -3312,7 +3312,7 @@ async function runMigrations() {
 
 async function dbFresh(options = {}) {
     if (!inProject()) error('No estás en un proyecto.');
-    
+
     // Si se pasa --force, saltar confirmación
     if (!options.force) {
         const answers = await inquirer.prompt([
@@ -3333,7 +3333,7 @@ async function dbFresh(options = {}) {
     }
 
     console.log('🗑️  Eliminando base de datos...');
-    
+
     const envPath = path.join(process.cwd(), '.env');
     const envContent = fs.readFileSync(envPath, 'utf8');
     const envVars = {};
@@ -3397,46 +3397,46 @@ async function makeAuthReset() {
         const envContent = fs.readFileSync(envPath, 'utf8');
         const dbType = envContent.includes('DB_TYPE=sqlsrv') ? 'sqlsrv' : 'mysql';
 
-    // Crear migración
-    write(process.cwd(), 'database/migrations/password_resets.sql', t.passwordResetMigration(dbType));
-    success('Creado: database/migrations/password_resets.sql');
+        // Crear migración
+        write(process.cwd(), 'database/migrations/password_resets.sql', t.passwordResetMigration(dbType));
+        success('Creado: database/migrations/password_resets.sql');
 
-    // Crear modelo
-    write(process.cwd(), 'app/Models/PasswordResetModel.php', t.passwordResetModel);
-    success('Creado: app/Models/PasswordResetModel.php');
+        // Crear modelo
+        write(process.cwd(), 'app/Models/PasswordResetModel.php', t.passwordResetModel);
+        success('Creado: app/Models/PasswordResetModel.php');
 
-    // Actualizar AuthController
-    const authControllerPath = path.join(process.cwd(), 'app/Controllers/AuthController.php');
-    if (exists(authControllerPath)) {
-        let authController = fs.readFileSync(authControllerPath, 'utf8');
-        
-        // Agregar use statement
-        if (!authController.includes('use App\\Models\\PasswordResetModel')) {
-            authController = authController.replace(
-                'use App\\Models\\UserModel;',
-                'use App\\Models\\PasswordResetModel;\nuse App\\Models\\UserModel;'
-            );
-        }
+        // Actualizar AuthController
+        const authControllerPath = path.join(process.cwd(), 'app/Controllers/AuthController.php');
+        if (exists(authControllerPath)) {
+            let authController = fs.readFileSync(authControllerPath, 'utf8');
 
-        // Agregar propiedad
-        if (!authController.includes('private PasswordResetModel $passwordResetModel')) {
-            authController = authController.replace(
-                'private RefreshTokenModel $refreshTokenModel;',
-                'private RefreshTokenModel $refreshTokenModel;\n    private PasswordResetModel $passwordResetModel;'
-            );
-        }
+            // Agregar use statement
+            if (!authController.includes('use App\\Models\\PasswordResetModel')) {
+                authController = authController.replace(
+                    'use App\\Models\\UserModel;',
+                    'use App\\Models\\PasswordResetModel;\nuse App\\Models\\UserModel;'
+                );
+            }
 
-        // Agregar inicialización en constructor
-        if (!authController.includes('$this->passwordResetModel = new PasswordResetModel()')) {
-            authController = authController.replace(
-                '$this->refreshTokenModel = new RefreshTokenModel();',
-                '$this->refreshTokenModel = new RefreshTokenModel();\n        $this->passwordResetModel = new PasswordResetModel();'
-            );
-        }
+            // Agregar propiedad
+            if (!authController.includes('private PasswordResetModel $passwordResetModel')) {
+                authController = authController.replace(
+                    'private RefreshTokenModel $refreshTokenModel;',
+                    'private RefreshTokenModel $refreshTokenModel;\n    private PasswordResetModel $passwordResetModel;'
+                );
+            }
 
-        // Agregar métodos si no existen
-        if (!authController.includes('public function forgotPassword()')) {
-            const resetMethods = `
+            // Agregar inicialización en constructor
+            if (!authController.includes('$this->passwordResetModel = new PasswordResetModel()')) {
+                authController = authController.replace(
+                    '$this->refreshTokenModel = new RefreshTokenModel();',
+                    '$this->refreshTokenModel = new RefreshTokenModel();\n        $this->passwordResetModel = new PasswordResetModel();'
+                );
+            }
+
+            // Agregar métodos si no existen
+            if (!authController.includes('public function forgotPassword()')) {
+                const resetMethods = `
 
     public function forgotPassword()
     {
@@ -3515,41 +3515,41 @@ async function makeAuthReset() {
         }
     }`;
 
-            authController = authController.replace(/}\s*$/, resetMethods + '\n}');
+                authController = authController.replace(/}\s*$/, resetMethods + '\n}');
+            }
+
+            fs.writeFileSync(authControllerPath, authController);
+            success('Actualizado: app/Controllers/AuthController.php');
         }
 
-        fs.writeFileSync(authControllerPath, authController);
-        success('Actualizado: app/Controllers/AuthController.php');
-    }
+        // Actualizar rutas
+        const routesPath = path.join(process.cwd(), 'app/Routes/web.php');
+        if (exists(routesPath)) {
+            let routes = fs.readFileSync(routesPath, 'utf8');
 
-    // Actualizar rutas
-    const routesPath = path.join(process.cwd(), 'app/Routes/web.php');
-    if (exists(routesPath)) {
-        let routes = fs.readFileSync(routesPath, 'utf8');
-        
-        if (!routes.includes('/auth/forgot-password')) {
-            const resetRoutes = `$router->post('/auth/forgot-password', 'AuthController', 'forgotPassword');
+            if (!routes.includes('/auth/forgot-password')) {
+                const resetRoutes = `$router->post('/auth/forgot-password', 'AuthController', 'forgotPassword');
                                 $router->post('/auth/reset-password', 'AuthController', 'resetPassword');`;
-            routes = routes.replace(
-                "$router->post('/auth/login', 'AuthController', 'login');",
-                "$router->post('/auth/login', 'AuthController', 'login');\n" + resetRoutes
-            );
-            fs.writeFileSync(routesPath, routes);
-            success('Actualizado: app/Routes/web.php');
+                routes = routes.replace(
+                    "$router->post('/auth/login', 'AuthController', 'login');",
+                    "$router->post('/auth/login', 'AuthController', 'login');\n" + resetRoutes
+                );
+                fs.writeFileSync(routesPath, routes);
+                success('Actualizado: app/Routes/web.php');
+            }
         }
-    }
 
-    console.log('\n📝 Próximos pasos:');
-    console.log('   1. Ejecuta: php-init db:migrate');
-    console.log('   2. Implementa el envío de emails en AuthController::forgotPassword()');
-    console.log('\n📬 Endpoints creados:');
-    console.log('   POST /auth/forgot-password - Solicitar recuperación');
-    console.log('   POST /auth/reset-password - Restablecer contraseña');
-    console.log('\n⏱️  Seguridad:');
-    console.log('   • Los tokens expiran automáticamente en 15 minutos');
-    console.log('   • Los tokens son de un solo uso (se eliminan al usarse)');
-    console.log('   • Los tokens antiguos se limpian al generar uno nuevo');
-    console.log('   • Para cambiar el tiempo de expiración, edita PasswordResetModel::DEFAULT_EXPIRY\n');
+        console.log('\n📝 Próximos pasos:');
+        console.log('   1. Ejecuta: php-init db:migrate');
+        console.log('   2. Implementa el envío de emails en AuthController::forgotPassword()');
+        console.log('\n📬 Endpoints creados:');
+        console.log('   POST /auth/forgot-password - Solicitar recuperación');
+        console.log('   POST /auth/reset-password - Restablecer contraseña');
+        console.log('\n⏱️  Seguridad:');
+        console.log('   • Los tokens expiran automáticamente en 15 minutos');
+        console.log('   • Los tokens son de un solo uso (se eliminan al usarse)');
+        console.log('   • Los tokens antiguos se limpian al generar uno nuevo');
+        console.log('   • Para cambiar el tiempo de expiración, edita PasswordResetModel::DEFAULT_EXPIRY\n');
     } catch (err) {
         if (err instanceof CLIError) throw err;
         error(`Error al generar sistema de recuperación: ${err.message}`);
@@ -3752,12 +3752,12 @@ program.command('init:docker')
 program.command('auth:cleanup-tokens')
     .description('Limpia tokens de recuperación de contraseña expirados')
     .addHelpText('after', `
-Ejemplo:
-  $ php-init auth:cleanup-tokens
-  
-Este comando elimina todos los tokens de password_resets que han expirado.
-Útil para ejecutar en un cron job periódico.
-`)
+        Ejemplo:
+        $ php-init auth:cleanup-tokens
+        
+        Este comando elimina todos los tokens de password_resets que han expirado.
+        Útil para ejecutar en un cron job periódico.
+        `)
     .action(cleanupExpiredTokens);
 
 // Manejador global de errores
